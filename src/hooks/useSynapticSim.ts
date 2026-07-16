@@ -163,6 +163,38 @@ function calcEthicsLevel(risk: number): EthicsMetrics['welfareLevel'] {
   return 'Halt Protocol';
 }
 
+interface InitialNetworkState {
+  electrodes: Electrode[];
+  izh: IzhState[];
+  hh: HHState[];
+  spikeHistory: number[][];
+}
+
+function createInitialNetwork(): InitialNetworkState {
+  const electrodes: Electrode[] = [];
+  const izh: IzhState[] = [];
+  const hh: HHState[] = [];
+  const spikeHistory: number[][] = [];
+
+  for (let y = 0; y < 8; y++) {
+    for (let x = 0; x < 8; x++) {
+      const id = y * 8 + x;
+      let role: Electrode['role'] = 'interneuron';
+      if (x === 0 && y === 2) role = 'input-a';
+      else if (x === 0 && y === 5) role = 'input-b';
+      else if (x === 7 && y === 1) role = 'motor-up';
+      else if (x === 7 && y === 6) role = 'motor-down';
+
+      electrodes.push({ id, x, y, voltage: -65 + Math.random() * 3, spikeRate: 1 + Math.random() * 2, role, lastSpikeTime: 0 });
+      izh.push({ v: -65 + Math.random() * 2, u: -14 + Math.random() });
+      hh.push({ V: -65 + Math.random() * 2, m: 0.053, h: 0.596, n: 0.318 });
+      spikeHistory.push([]);
+    }
+  }
+
+  return { electrodes, izh, hh, spikeHistory };
+}
+
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
 export const useSynapticSim = () => {
@@ -181,7 +213,8 @@ export const useSynapticSim = () => {
   });
 
   // Electrodes
-  const [electrodes, setElectrodes] = useState<Electrode[]>([]);
+  const [initialNetwork] = useState<InitialNetworkState>(createInitialNetwork);
+  const [electrodes, setElectrodes] = useState<Electrode[]>(initialNetwork.electrodes);
 
   // Tasks
   const [activeTask, setActiveTask] = useState<TaskType>('pong');
@@ -219,10 +252,10 @@ export const useSynapticSim = () => {
   }, []);
 
   // ── Per-electrode internal neuron states (ref = no re-render) ──
-  const izhStates = useRef<IzhState[]>([]);
-  const hhStates  = useRef<HHState[]>([]);
+  const izhStates = useRef<IzhState[]>(initialNetwork.izh);
+  const hhStates  = useRef<HHState[]>(initialNetwork.hh);
   // Spike history per electrode: list of absolute ms timestamps
-  const spikeHistory = useRef<number[][]>([]);
+  const spikeHistory = useRef<number[][]>(initialNetwork.spikeHistory);
   const simTimeMs = useRef<number>(0); // elapsed sim time in ms
 
   // Ethics welfare log (persisted in ref to avoid stale closure)
@@ -236,6 +269,7 @@ export const useSynapticSim = () => {
   const logicRef       = useRef(logicGate);
   const activeTaskRef  = useRef(activeTask);
   const modelTypeRef   = useRef(modelType);
+  const burstMetricsRef = useRef(burstMetrics);
 
   useEffect(() => { incubatorRef.current  = incubator; },  [incubator]);
   useEffect(() => { vitalsRef.current     = vitals; },     [vitals]);
@@ -244,35 +278,9 @@ export const useSynapticSim = () => {
   useEffect(() => { logicRef.current      = logicGate; },  [logicGate]);
   useEffect(() => { activeTaskRef.current = activeTask; }, [activeTask]);
   useEffect(() => { modelTypeRef.current  = modelType; },  [modelType]);
+  useEffect(() => { burstMetricsRef.current = burstMetrics; }, [burstMetrics]);
 
   // ── Initialize electrodes + neuron states ──────────────────────
-  useEffect(() => {
-    const initial: Electrode[] = [];
-    const izh: IzhState[]      = [];
-    const hh:  HHState[]       = [];
-    const hist: number[][]     = [];
-
-    for (let y = 0; y < 8; y++) {
-      for (let x = 0; x < 8; x++) {
-        const id = y * 8 + x;
-        let role: Electrode['role'] = 'interneuron';
-        if (x === 0 && y === 2) role = 'input-a';
-        else if (x === 0 && y === 5) role = 'input-b';
-        else if (x === 7 && y === 1) role = 'motor-up';
-        else if (x === 7 && y === 6) role = 'motor-down';
-
-        initial.push({ id, x, y, voltage: -65 + Math.random() * 3, spikeRate: 1 + Math.random() * 2, role, lastSpikeTime: 0 });
-        izh.push({ v: -65 + Math.random() * 2, u: -14 + Math.random() });
-        hh.push({ V: -65 + Math.random() * 2, m: 0.053, h: 0.596, n: 0.318 });
-        hist.push([]);
-      }
-    }
-    setElectrodes(initial);
-    izhStates.current  = izh;
-    hhStates.current   = hh;
-    spikeHistory.current = hist;
-  }, []);
-
   // ── Actions ─────────────────────────────────────────────────────
   const adjustIncubator = useCallback((param: keyof IncubatorParams, value: number) => {
     setIncubator(prev => ({ ...prev, [param]: value }));
@@ -289,6 +297,8 @@ export const useSynapticSim = () => {
   }, [addLog]);
 
   const triggerElectrodeStimulation = useCallback((id: number) => {
+    if (!Number.isInteger(id) || !electrodesRef.current.some(el => el.id === id)) return;
+
     // Inject a depolarising current into both model states
     if (izhStates.current[id]) izhStates.current[id].v = 30;
     if (hhStates.current[id])  hhStates.current[id].V  = 30;
@@ -341,7 +351,7 @@ export const useSynapticSim = () => {
       const starving = inc.glucose < 3.0 || inc.oxygen < 85;
 
       let newCellCount  = vit.cellCount;
-      let newViability  = Math.max(0, Math.min(100, Math.round(bioScore)));
+      const newViability = Math.max(0, Math.min(100, Math.round(bioScore)));
 
       if (newViability < 60) {
         newCellCount = Math.max(2000, Math.round(newCellCount - (60 - newViability) * 50));
@@ -399,7 +409,7 @@ export const useSynapticSim = () => {
         const noise   = (Math.random() - 0.5) * 2.0;
         const elI     = networkI + noise;
         let spikedThisTick = false;
-        let finalV = -65;
+        let finalV: number;
 
         if (model === 'hodgkin-huxley') {
           let s = hhStates.current[eIdx];
@@ -447,7 +457,7 @@ export const useSynapticSim = () => {
       // Synchrony: fraction of electrodes that spiked this tick
       const spikingCount  = tickSpikes.filter(Boolean).length;
       const synchrony     = spikingCount / els.length;
-      const avgSyncRolled = synchrony * 0.1 + burstMetrics.synchronyScore * 0.9; // smoothed
+      const avgSyncRolled = synchrony * 0.1 + burstMetricsRef.current.synchronyScore * 0.9; // smoothed
 
       const burstFreq = totalBursts > 0
         ? Math.round((totalBursts / Math.max(1, now / 60000)) * 10) / 10
@@ -460,6 +470,7 @@ export const useSynapticSim = () => {
         networkBursting: synchrony > 0.4,
         totalBursts,
       };
+      burstMetricsRef.current = newBurstMetrics;
       setBurstMetrics(newBurstMetrics);
 
       // ── 4. ETHICS METRICS ─────────────────────────────────────────
@@ -529,8 +540,14 @@ export const useSynapticSim = () => {
 
         // Sensory input to electrodes
         updatedElectrodes.forEach(c => {
-          if (c.role === 'input-a' && p.ballY < p.paddleY) izhStates.current[c.id].v = 15;
-          if (c.role === 'input-b' && p.ballY > p.paddleY) izhStates.current[c.id].v = 15;
+          if (c.role === 'input-a' && p.ballY < p.paddleY) {
+            izhStates.current[c.id].v = 15;
+            hhStates.current[c.id].V = 15;
+          }
+          if (c.role === 'input-b' && p.ballY > p.paddleY) {
+            izhStates.current[c.id].v = 15;
+            hhStates.current[c.id].V = 15;
+          }
         });
 
         p.paddleY += (p.ballY - p.paddleY) * 0.05 * trackSpeed * (speed > 0.5 ? 1.2 : 0.6);
@@ -571,8 +588,14 @@ export const useSynapticSim = () => {
           }
           const chA = updatedElectrodes.find(e => e.role === 'input-a');
           const chB = updatedElectrodes.find(e => e.role === 'input-b');
-          if (chA && lg.inputA) izhStates.current[chA.id].v = 20;
-          if (chB && lg.inputB) izhStates.current[chB.id].v = 20;
+          if (chA && lg.inputA) {
+            izhStates.current[chA.id].v = 20;
+            hhStates.current[chA.id].V = 20;
+          }
+          if (chB && lg.inputB) {
+            izhStates.current[chB.id].v = 20;
+            hhStates.current[chB.id].V = 20;
+          }
           lg.epochs += 1;
           const weight = Math.min(0.98, 0.4 + (newSynapticDensity / 1500) * 0.1 + inc.dopamine * 0.05);
           lg.actualOutput = Math.random() < weight ? lg.expectedOutput : !lg.expectedOutput;
@@ -598,7 +621,7 @@ export const useSynapticSim = () => {
     }, TICK_MS);
 
     return () => clearInterval(simTick);
-  }, [addLog, burstMetrics.synchronyScore]);
+  }, [addLog]);
 
   return {
     incubator, vitals, activeTask, logicGate, pong,
