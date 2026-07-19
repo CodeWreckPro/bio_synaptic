@@ -1,4 +1,4 @@
-import { test, describe, expect } from 'vitest';
+import { test, describe } from 'vitest';
 import assert from 'node:assert';
 import {
   IZHI_PRESETS,
@@ -6,6 +6,8 @@ import {
   getQ10Factor,
   stepHH,
   detectBurstsMaxInterval,
+  createChemicalMatrix,
+  diffuseChemicalMatrix,
   SynapticNetwork,
 } from '../src/index.js';
 
@@ -67,10 +69,10 @@ describe('Hodgkin-Huxley Q10 Thermodynamics scaling', () => {
   });
 
   test('stepHH integration handles depolarization', () => {
-    let state = { V: -65.0, m: 0.05, h: 0.6, n: 0.3 };
+    const state = { V: -65.0, m: 0.05, h: 0.6, n: 0.3 };
 
     // Test a single integration step under stimulus (I = 10.0) at 37°C
-    const [nextState, spiked] = stepHH(state, 10.0, 0.1, 37.0);
+    const [nextState] = stepHH(state, 10.0, 0.1, 37.0);
 
     assert.notDeepStrictEqual(nextState, state);
     assert.ok(nextState.V > state.V, 'Depolarizing current must increase membrane voltage V');
@@ -158,5 +160,46 @@ describe('SynapticNetwork Simulator Class Integration', () => {
 
     assert.strictEqual(net.electrodes[0].voltage, 30.0);
     assert.strictEqual(net.electrodes[0].lastSpikeTime, 0);
+  });
+});
+
+describe('2D neurotransmitter diffusion', () => {
+  test('spreads a glutamate release to adjacent cells and applies decay', () => {
+    const glutamate = createChemicalMatrix(3);
+    glutamate[1][1] = 1;
+
+    const next = diffuseChemicalMatrix(glutamate, { diffusionRate: 0.4, decayRate: 0.05 });
+
+    assert.ok(next[1][1] > 0 && next[1][1] < 1, 'Source concentration should persist but decrease');
+    assert.ok(next[0][1] > 0, 'Chemical should diffuse north');
+    assert.ok(next[1][0] > 0, 'Chemical should diffuse west');
+    assert.ok(next[1][2] > 0, 'Chemical should diffuse east');
+    assert.ok(next[2][1] > 0, 'Chemical should diffuse south');
+    const total = next.flat().reduce((sum, value) => sum + value, 0);
+    assert.ok(Math.abs(total - 0.95) < 1e-10, 'Only the configured 5% decay should reduce total concentration');
+  });
+
+  test('retains diffusion at grid edges rather than leaking beyond the field', () => {
+    const glutamate = createChemicalMatrix(3);
+    glutamate[0][0] = 1;
+
+    const next = diffuseChemicalMatrix(glutamate, { diffusionRate: 0.4, decayRate: 0 });
+
+    assert.strictEqual(next[0][0], 0.6);
+    assert.strictEqual(next[0][1], 0.2);
+    assert.strictEqual(next[1][0], 0.2);
+    assert.strictEqual(next.flat().reduce((sum, value) => sum + value, 0), 1);
+  });
+
+  test('tracks regional glutamate and GABA matrices on the network', () => {
+    const net = new SynapticNetwork();
+    net.releaseChemical(3, 3, 1, 'glutamate');
+    net.releaseChemical(3, 3, 0.5, 'gaba');
+    net.tick(0);
+
+    assert.ok(net.glutamateMatrix.flat().some(value => value > 0));
+    assert.ok(net.gabaMatrix.flat().some(value => value > 0));
+    assert.strictEqual(net.electrodes[3 + 3 * 8].glutamate, net.glutamateMatrix[3][3]);
+    assert.strictEqual(net.electrodes[3 + 3 * 8].gaba, net.gabaMatrix[3][3]);
   });
 });

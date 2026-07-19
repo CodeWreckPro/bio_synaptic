@@ -29,6 +29,63 @@ export interface Electrode {
   spikeRate: number;    // Spike frequency in Hz
   role: 'input-a' | 'input-b' | 'motor-up' | 'motor-down' | 'interneuron';
   lastSpikeTime: number;
+  glutamate: number;    // Local extracellular excitatory transmitter concentration
+  gaba: number;         // Local extracellular inhibitory transmitter concentration
+}
+
+/** A row-major concentration field aligned with the MEA's 2D coordinates. */
+export type ChemicalMatrix = number[][];
+
+export interface ChemicalDiffusionConfig {
+  diffusionRate: number;
+  decayRate: number;
+}
+
+export const DEFAULT_CHEMICAL_DIFFUSION: ChemicalDiffusionConfig = {
+  diffusionRate: 0.2,
+  decayRate: 0.05,
+};
+
+export const MEA_GRID_SIZE = 8;
+
+/** Creates an empty square concentration field. */
+export function createChemicalMatrix(size = MEA_GRID_SIZE): ChemicalMatrix {
+  return Array.from({ length: size }, () => new Array<number>(size).fill(0));
+}
+
+/**
+ * Conservatively diffuses a concentration field to its orthogonal neighbours,
+ * then applies first-order clearance. Boundary cells distribute only to valid
+ * neighbours, so no chemical is lost at the edge before decay is applied.
+ */
+export function diffuseChemicalMatrix(
+  matrix: ChemicalMatrix,
+  config: Partial<ChemicalDiffusionConfig> = {},
+): ChemicalMatrix {
+  const diffusionRate = Math.max(0, Math.min(1, config.diffusionRate ?? DEFAULT_CHEMICAL_DIFFUSION.diffusionRate));
+  const decayRate = Math.max(0, Math.min(1, config.decayRate ?? DEFAULT_CHEMICAL_DIFFUSION.decayRate));
+  const height = matrix.length;
+  const next = matrix.map(row => new Array<number>(row.length).fill(0));
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < matrix[y].length; x++) {
+      const concentration = Math.max(0, matrix[y][x] ?? 0);
+      const neighbours: Array<[number, number]> = [];
+      if (y > 0) neighbours.push([x, y - 1]);
+      if (y + 1 < height) neighbours.push([x, y + 1]);
+      if (x > 0) neighbours.push([x - 1, y]);
+      if (x + 1 < matrix[y].length) neighbours.push([x + 1, y]);
+
+      const transported = concentration * diffusionRate;
+      next[y][x] += concentration - transported;
+      if (neighbours.length > 0) {
+        const share = transported / neighbours.length;
+        neighbours.forEach(([nx, ny]) => { next[ny][nx] += share; });
+      }
+    }
+  }
+
+  return next.map(row => row.map(value => Math.max(0, value * (1 - decayRate))));
 }
 
 /** Bioreactor incubator environment parameters */
@@ -386,6 +443,9 @@ export function detectBurstsMaxInterval(
  */
 export class SynapticNetwork {
   public electrodes: Electrode[] = [];
+  public glutamateMatrix: ChemicalMatrix = createChemicalMatrix();
+  public gabaMatrix: ChemicalMatrix = createChemicalMatrix();
+  public chemicalDiffusion: ChemicalDiffusionConfig = { ...DEFAULT_CHEMICAL_DIFFUSION };
   public incubator: IncubatorParams;
   public vitals: SimulationVitals;
   
@@ -441,6 +501,8 @@ export class SynapticNetwork {
     this.hhStates = [];
     this.spikeHistory = [];
     this.weights = [];
+    this.glutamateMatrix = createChemicalMatrix();
+    this.gabaMatrix = createChemicalMatrix();
     this.lastSpikeTimings = new Array(64).fill(-Infinity);
     this.elapsedSimTime = 0;
     this.welfareLog = [];
@@ -463,6 +525,8 @@ export class SynapticNetwork {
           spikeRate: 1.0 + Math.random() * 2,
           role,
           lastSpikeTime: 0,
+          glutamate: 0,
+          gaba: 0,
         });
 
         this.izhStates.push({
@@ -524,6 +588,13 @@ export class SynapticNetwork {
     this.hhStates[id].V  = depolarizingVoltage;
     this.electrodes[id].voltage = depolarizingVoltage;
     this.electrodes[id].lastSpikeTime = this.elapsedSimTime;
+  }
+
+  /** Adds neurotransmitter to a single valid MEA coordinate. */
+  public releaseChemical(x: number, y: number, amount: number, chemical: 'glutamate' | 'gaba' = 'glutamate'): void {
+    if (x < 0 || y < 0 || x >= MEA_GRID_SIZE || y >= MEA_GRID_SIZE || !Number.isFinite(amount)) return;
+    const matrix = chemical === 'glutamate' ? this.glutamateMatrix : this.gabaMatrix;
+    matrix[y][x] = Math.max(0, matrix[y][x] + amount);
   }
 
   /**
@@ -606,9 +677,12 @@ export class SynapticNetwork {
         }
       }
 
-      const totalStimulus = globalExcitatoryDrive + synapticI + noise;
+      const localGlutamate = this.glutamateMatrix[this.electrodes[i].y][this.electrodes[i].x];
+      const localGaba = this.gabaMatrix[this.electrodes[i].y][this.electrodes[i].x];
+      const chemicalDrive = localGlutamate * 2.0 - localGaba * 2.0;
+      const totalStimulus = Math.max(0, globalExcitatoryDrive + synapticI + chemicalDrive + noise);
       let didSpike = false;
-      let finalV = -65.0;
+      let finalV: number;
 
       if (model === 'hodgkin-huxley') {
         let s = this.hhStates[i];
@@ -641,6 +715,7 @@ export class SynapticNetwork {
       if (didSpike) {
         this.spikeHistory[i].push(now);
         this.electrodes[i].lastSpikeTime = now;
+        this.releaseChemical(this.electrodes[i].x, this.electrodes[i].y, 0.25);
         
         // ── 3. SPIKE-TIMING-DEPENDENT PLASTICITY (STDP) ───────────
         // Modulated heavily by Dopamine levels (plasticity factor)
@@ -648,7 +723,6 @@ export class SynapticNetwork {
         const A_dep = 0.018 / (1.0 + this.incubator.dopamine * 0.2); // Depression scale
         const tau_stdp = 20.0; // STDP window (ms)
 
-        const t_pre = this.lastSpikeTimings[i]; // pre-synaptic time
         this.lastSpikeTimings[i] = now;
 
         for (let j = 0; j < 64; j++) {
@@ -669,6 +743,13 @@ export class SynapticNetwork {
         }
       }
     }
+
+    this.glutamateMatrix = diffuseChemicalMatrix(this.glutamateMatrix, this.chemicalDiffusion);
+    this.gabaMatrix = diffuseChemicalMatrix(this.gabaMatrix, this.chemicalDiffusion);
+    this.electrodes.forEach((electrode) => {
+      electrode.glutamate = this.glutamateMatrix[electrode.y][electrode.x];
+      electrode.gaba = this.gabaMatrix[electrode.y][electrode.x];
+    });
 
     // Trim historical logs to prevent memory overflow
     const trimCutoff = now - 60000;
@@ -778,4 +859,3 @@ export function calcEthicsLevel(risk: number): EthicsMetrics['welfareLevel'] {
   if (risk < 70.0) return 'Review Required';
   return 'Halt Protocol';
 }
-
