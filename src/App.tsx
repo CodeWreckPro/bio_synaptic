@@ -20,6 +20,7 @@ export const App: React.FC = () => {
   const {
     incubator, vitals, activeTask, logicGate, pong,
     electrodes, logs, burstMetrics, ethicsMetrics, rasterEvents,
+    glutamateMatrix, gabaMatrix, meaViewMode, setMeaViewMode,
     modelType, setModelType,
     adjustIncubator, administerDopamine, administerGABA,
     triggerElectrodeStimulation, seedStemCells,
@@ -266,6 +267,10 @@ export const App: React.FC = () => {
               logs={logs}
               rasterEvents={rasterEvents}
               burstMetrics={burstMetrics}
+              glutamateMatrix={glutamateMatrix}
+              gabaMatrix={gabaMatrix}
+              viewMode={meaViewMode}
+              setViewMode={setMeaViewMode}
             />
           )}
           {activeTab === 'connectome' && (
