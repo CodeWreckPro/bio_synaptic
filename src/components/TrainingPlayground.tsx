@@ -165,13 +165,9 @@ export const TrainingPlayground: React.FC<TrainingPlaygroundProps> = ({
         // Correct if random < (accuracy / 100) with a slight floor
         const correct = Math.random() < (prev.accuracy / 100);
 
-        let nextAccuracy = prev.accuracy;
-        if (correct) {
-          nextAccuracy = Math.min(95, prev.accuracy + improve * (Math.random() * 0.6 + 0.7));
-        } else {
-          nextAccuracy = Math.max(30, prev.accuracy - 1.5 * Math.random());
-        }
-        nextAccuracy = Math.round(nextAccuracy * 10) / 10;
+        const nextAccuracy = Math.round((correct
+          ? Math.min(95, prev.accuracy + improve * (Math.random() * 0.6 + 0.7))
+          : Math.max(30, prev.accuracy - 1.5 * Math.random())) * 10) / 10;
 
         const nextIndex = (prev.currentIndex + 1) % BRAILLE_LETTERS.length;
         const newEntry: BrailleHistoryEntry = { letter: currentLetter.letter, correct };
