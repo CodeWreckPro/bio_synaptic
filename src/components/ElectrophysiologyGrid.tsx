@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import type { Electrode, SpikeEvent, BurstMetrics } from '../hooks/useSynapticSim';
+import type { Electrode, SpikeEvent, BurstMetrics, ChemicalMatrix, MEAViewMode } from '../hooks/useSynapticSim';
 import { Zap, Activity, Info, BarChart } from 'lucide-react';
 
 interface ElectrophysiologyGridProps {
@@ -8,6 +8,10 @@ interface ElectrophysiologyGridProps {
   logs: string[];
   rasterEvents: SpikeEvent[];
   burstMetrics: BurstMetrics;
+  glutamateMatrix: ChemicalMatrix;
+  gabaMatrix: ChemicalMatrix;
+  viewMode: MEAViewMode;
+  setViewMode: (mode: MEAViewMode) => void;
 }
 
 export const ElectrophysiologyGrid: React.FC<ElectrophysiologyGridProps> = ({
@@ -16,9 +20,14 @@ export const ElectrophysiologyGrid: React.FC<ElectrophysiologyGridProps> = ({
   logs,
   rasterEvents,
   burstMetrics,
+  glutamateMatrix,
+  gabaMatrix,
+  viewMode,
+  setViewMode,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rasterCanvasRef = useRef<HTMLCanvasElement>(null);
+  const chemicalCanvasRef = useRef<HTMLCanvasElement>(null);
   const [selectedElectrode, setSelectedElectrode] = useState<Electrode | null>(null);
 
   // Active spike visualization counter
@@ -201,6 +210,32 @@ export const ElectrophysiologyGrid: React.FC<ElectrophysiologyGridProps> = ({
     ctx.fillText('Now', W, H - 3);
   }, [rasterEvents]);
 
+  useEffect(() => {
+    if (viewMode === 'voltage') return;
+    const canvas = chemicalCanvasRef.current;
+    const matrix = viewMode === 'glutamate' ? glutamateMatrix : gabaMatrix;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+
+    const size = 8;
+    const cellSize = canvas.width / size;
+    const maxConcentration = Math.max(0.01, ...matrix.flat());
+    const hue = viewMode === 'glutamate' ? 145 : 275;
+    ctx.fillStyle = 'rgba(5, 10, 14, 0.95)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    matrix.forEach((row, y) => row.forEach((concentration, x) => {
+      const intensity = Math.min(1, concentration / maxConcentration);
+      ctx.fillStyle = `hsla(${hue}, 85%, ${12 + intensity * 48}%, ${0.25 + intensity * 0.75})`;
+      ctx.fillRect(x * cellSize + 2, y * cellSize + 2, cellSize - 4, cellSize - 4);
+      ctx.strokeStyle = `hsla(${hue}, 90%, 70%, ${0.12 + intensity * 0.45})`;
+      ctx.strokeRect(x * cellSize + 2, y * cellSize + 2, cellSize - 4, cellSize - 4);
+      ctx.fillStyle = 'rgba(255,255,255,0.78)';
+      ctx.font = '11px JetBrains Mono, monospace';
+      ctx.fillText(`CH${String(y * size + x).padStart(2, '0')}`, x * cellSize + 8, y * cellSize + 18);
+    }));
+  }, [viewMode, glutamateMatrix, gabaMatrix]);
+
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: '20px', height: '100%' }}>
       {/* Left: Electrode Array Grid */}
@@ -223,6 +258,20 @@ export const ElectrophysiologyGrid: React.FC<ElectrophysiologyGridProps> = ({
           </div>
         </div>
 
+        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', alignSelf: 'flex-start', fontSize: '0.72rem', color: 'rgba(255,255,255,0.6)' }}>
+          Overlay view
+          <select
+            value={viewMode}
+            onChange={(event) => setViewMode(event.target.value as MEAViewMode)}
+            aria-label="MEA overlay view"
+            style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.14)', borderRadius: '6px', color: '#fff', padding: '5px 8px' }}
+          >
+            <option value="voltage">Electrical Voltage</option>
+            <option value="glutamate">Glutamate Density</option>
+            <option value="gaba">GABA Density</option>
+          </select>
+        </label>
+
         {/* Burst Metrics Row */}
         <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
           {[
@@ -243,6 +292,7 @@ export const ElectrophysiologyGrid: React.FC<ElectrophysiologyGridProps> = ({
         </div>
 
         {/* 8x8 Visual Grid container */}
+        {viewMode === 'voltage' ? (
         <div style={{ 
           display: 'grid', 
           gridTemplateColumns: 'repeat(8, 1fr)', 
@@ -347,6 +397,21 @@ export const ElectrophysiologyGrid: React.FC<ElectrophysiologyGridProps> = ({
             );
           })}
         </div>
+        ) : (
+          <canvas
+            ref={chemicalCanvasRef}
+            width={520}
+            height={520}
+            onClick={(event) => {
+              const bounds = event.currentTarget.getBoundingClientRect();
+              const x = Math.min(7, Math.floor(((event.clientX - bounds.left) / bounds.width) * 8));
+              const y = Math.min(7, Math.floor(((event.clientY - bounds.top) / bounds.height) * 8));
+              const electrode = electrodes[y * 8 + x];
+              if (electrode) setSelectedElectrode(electrode);
+            }}
+            style={{ width: '100%', maxWidth: '520px', margin: '0 auto', aspectRatio: '1', cursor: 'crosshair', borderRadius: '12px', border: `1px solid ${viewMode === 'glutamate' ? 'rgba(0,255,127,0.35)' : 'rgba(168,85,247,0.45)'}` }}
+          />
+        )}
       </div>
 
       {/* Right Sidebar: Diagnostic Panel & Real-time Waveform */}

@@ -194,7 +194,7 @@ export const GrowRoom: React.FC<GrowRoomProps> = ({
     }
 
     // Set initial seed growth paths if empty and healthy
-    let activePaths = [...growthPaths];
+    const activePaths = [...growthPaths];
     if (activePaths.length === 0 && vitals.synapticDensity > 15 && isGrowing) {
       for (let i = 0; i < 8; i++) {
         const sourceNode = electrodeGrid[Math.floor(Math.random() * electrodeGrid.length)];
