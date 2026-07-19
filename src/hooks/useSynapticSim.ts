@@ -3,6 +3,31 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type NeuronModel = 'izhikevich' | 'hodgkin-huxley';
+export type ChemicalMatrix = number[][];
+export type MEAViewMode = 'voltage' | 'glutamate' | 'gaba';
+
+const MEA_GRID_SIZE = 8;
+const CHEMICAL_DIFFUSION_RATE = 0.2;
+const CHEMICAL_DECAY_RATE = 0.05;
+
+const createChemicalMatrix = (): ChemicalMatrix =>
+  Array.from({ length: MEA_GRID_SIZE }, () => new Array<number>(MEA_GRID_SIZE).fill(0));
+
+const diffuseChemicalMatrix = (matrix: ChemicalMatrix): ChemicalMatrix => {
+  const next = createChemicalMatrix();
+  matrix.forEach((row, y) => row.forEach((value, x) => {
+    const concentration = Math.max(0, value);
+    const neighbours: Array<[number, number]> = [];
+    if (y > 0) neighbours.push([x, y - 1]);
+    if (y < MEA_GRID_SIZE - 1) neighbours.push([x, y + 1]);
+    if (x > 0) neighbours.push([x - 1, y]);
+    if (x < MEA_GRID_SIZE - 1) neighbours.push([x + 1, y]);
+    const transported = concentration * CHEMICAL_DIFFUSION_RATE;
+    next[y][x] += concentration - transported;
+    neighbours.forEach(([nx, ny]) => { next[ny][nx] += transported / neighbours.length; });
+  }));
+  return next.map(row => row.map(value => value * (1 - CHEMICAL_DECAY_RATE)));
+};
 
 export interface Electrode {
   id: number;
@@ -215,6 +240,9 @@ export const useSynapticSim = () => {
   // Electrodes
   const [initialNetwork] = useState<InitialNetworkState>(createInitialNetwork);
   const [electrodes, setElectrodes] = useState<Electrode[]>(initialNetwork.electrodes);
+  const [glutamateMatrix, setGlutamateMatrix] = useState<ChemicalMatrix>(createChemicalMatrix);
+  const [gabaMatrix, setGabaMatrix] = useState<ChemicalMatrix>(createChemicalMatrix);
+  const [meaViewMode, setMeaViewMode] = useState<MEAViewMode>('voltage');
 
   // Tasks
   const [activeTask, setActiveTask] = useState<TaskType>('pong');
@@ -257,6 +285,8 @@ export const useSynapticSim = () => {
   // Spike history per electrode: list of absolute ms timestamps
   const spikeHistory = useRef<number[][]>(initialNetwork.spikeHistory);
   const simTimeMs = useRef<number>(0); // elapsed sim time in ms
+  const glutamateMatrixRef = useRef<ChemicalMatrix>(glutamateMatrix);
+  const gabaMatrixRef = useRef<ChemicalMatrix>(gabaMatrix);
 
   // Ethics welfare log (persisted in ref to avoid stale closure)
   const ethicsWelfareLog = useRef<string[]>([]);
@@ -292,6 +322,9 @@ export const useSynapticSim = () => {
   }, [addLog]);
 
   const administerGABA = useCallback(() => {
+    const updatedGaba = gabaMatrixRef.current.map(row => row.map(value => value + 0.15));
+    gabaMatrixRef.current = updatedGaba;
+    setGabaMatrix(updatedGaba);
     setIncubator(prev => ({ ...prev, gaba: Math.min(prev.gaba + 3.0, 10.0) }));
     addLog('Administered GABA inhibitory dose (+3.0 µM). Membrane stabilisation engaged.');
   }, [addLog]);
@@ -318,6 +351,10 @@ export const useSynapticSim = () => {
     izhStates.current  = izhStates.current.map(() => ({ v: -65 + Math.random() * 2, u: -14 + Math.random() }));
     hhStates.current   = hhStates.current.map(() => ({ V: -65 + Math.random() * 2, m: 0.053, h: 0.596, n: 0.318 }));
     spikeHistory.current = spikeHistory.current.map(() => []);
+    glutamateMatrixRef.current = createChemicalMatrix();
+    gabaMatrixRef.current = createChemicalMatrix();
+    setGlutamateMatrix(glutamateMatrixRef.current);
+    setGabaMatrix(gabaMatrixRef.current);
     simTimeMs.current  = 0;
     ethicsWelfareLog.current = [];
     addLog('Clean MEA grid prepared. Seeding neural stem cells (150,000 count). Growth loop started.');
@@ -407,7 +444,9 @@ export const useSynapticSim = () => {
       for (let eIdx = 0; eIdx < els.length; eIdx++) {
         // Per-electrode current: base + noise + task stimulation
         const noise   = (Math.random() - 0.5) * 2.0;
-        const elI     = networkI + noise;
+        const localGlutamate = glutamateMatrixRef.current[els[eIdx].y][els[eIdx].x];
+        const localGaba = gabaMatrixRef.current[els[eIdx].y][els[eIdx].x];
+        const elI = Math.max(0, networkI + localGlutamate * 2.0 - localGaba * 2.0 + noise);
         let spikedThisTick = false;
         let finalV: number;
 
@@ -437,6 +476,21 @@ export const useSynapticSim = () => {
           spikeHistory.current[eIdx].push(now);
         }
       }
+
+      // Action potentials release glutamate locally; both fields then diffuse
+      // to orthogonal neighbours and clear by 5% per simulation tick.
+      const releasedGlutamate = glutamateMatrixRef.current.map(row => [...row]);
+      tickSpikes.forEach((spiked, index) => {
+        if (!spiked) return;
+        const electrode = els[index];
+        releasedGlutamate[electrode.y][electrode.x] += 0.25;
+      });
+      const nextGlutamate = diffuseChemicalMatrix(releasedGlutamate);
+      const nextGaba = diffuseChemicalMatrix(gabaMatrixRef.current);
+      glutamateMatrixRef.current = nextGlutamate;
+      gabaMatrixRef.current = nextGaba;
+      setGlutamateMatrix(nextGlutamate);
+      setGabaMatrix(nextGaba);
 
       // Trim spike history to last 60 seconds
       const keepAfter = now - 60000;
@@ -626,6 +680,7 @@ export const useSynapticSim = () => {
   return {
     incubator, vitals, activeTask, logicGate, pong,
     electrodes, logs, burstMetrics, ethicsMetrics, rasterEvents,
+    glutamateMatrix, gabaMatrix, meaViewMode, setMeaViewMode,
     modelType, setModelType,
     adjustIncubator, administerDopamine, administerGABA,
     triggerElectrodeStimulation, seedStemCells,
