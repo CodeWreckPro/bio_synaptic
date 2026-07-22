@@ -1,21 +1,34 @@
 import React from 'react';
 import type { IncubatorParams, SimulationVitals } from '../hooks/useSynapticSim';
-import { Thermometer, Heart, AlertTriangle, Droplets } from 'lucide-react';
+import { Thermometer, Heart, AlertTriangle, Activity } from 'lucide-react';
 
 interface IncubatorControlsProps {
   incubator: IncubatorParams;
   vitals: SimulationVitals;
   adjustIncubator: (param: keyof IncubatorParams, value: number) => void;
-  logs: string[];
+  cellPopulation: number;
+  apoptosisCount: number;
+  mitosisCount: number;
+  averageNetworkHealth: number;
+  lifecycleLogs: string[];
 }
 
 export const IncubatorControls: React.FC<IncubatorControlsProps> = ({
   incubator,
   vitals,
   adjustIncubator,
-  logs
+  cellPopulation,
+  apoptosisCount,
+  mitosisCount,
+  averageNetworkHealth,
+  lifecycleLogs,
 }) => {
   const isEmergency = vitals.viability < 80 || vitals.isStarving;
+  const phHazard = incubator.pH < 7.0 || incubator.pH > 7.6;
+  const temperatureHazard = incubator.temperature < 35 || incubator.temperature > 39;
+  const hazardMessage = phHazard
+    ? `CRITICAL: ${incubator.pH < 7 ? 'Acidic' : 'Alkaline'} pH causing high cell mortality`
+    : temperatureHazard ? `CRITICAL: ${incubator.temperature < 35 ? 'Low' : 'High'} temperature causing high cell mortality` : null;
 
   // Temperature status string
   const tempStatus = incubator.temperature > 39 ? 'HYPERTHERMIA (LETHAL)' :
@@ -68,6 +81,8 @@ export const IncubatorControls: React.FC<IncubatorControlsProps> = ({
             </div>
           )}
         </div>
+
+        {hazardMessage && <div role="alert" style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '11px 14px', borderRadius: '8px', border: '1px solid var(--accent-red)', background: 'rgba(255,46,99,0.14)', color: 'var(--accent-red)', fontWeight: 700, fontSize: '0.78rem', animation: 'heartbeat 1.2s infinite ease-in-out' }}><AlertTriangle size={16} />{hazardMessage}</div>}
 
         {/* Environmental Sliders */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -200,6 +215,10 @@ export const IncubatorControls: React.FC<IncubatorControlsProps> = ({
 
       {/* Right Sidebar: Health Vitals Dial & Perfusion Logs */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        <div className="glass-panel" style={{ padding: '14px', display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' }}>
+          <div style={{ gridColumn: '1 / -1', fontSize: '0.68rem', textTransform: 'uppercase', color: 'rgba(0,220,255,0.7)', fontWeight: 700 }}>Cell Population Dynamics</div>
+          {[['Live Cell Count', cellPopulation.toLocaleString()], ['Apoptosis Rate', `${apoptosisCount} events`], ['Mitosis Rate', `${mitosisCount} events`], ['Average Health Index', `${(averageNetworkHealth * 100).toFixed(1)}%`]].map(([label, value]) => <div key={label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem' }}><span style={{ color: 'rgba(255,255,255,0.45)' }}>{label}</span><span className="font-telemetry" style={{ color: 'var(--accent-cyan)', fontWeight: 700 }}>{value}</span></div>)}
+        </div>
         {/* Viability Gauge Dial */}
         <div className="glass-panel" style={{ padding: '20px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', alignSelf: 'flex-start' }}>
@@ -255,11 +274,11 @@ export const IncubatorControls: React.FC<IncubatorControlsProps> = ({
           </div>
         </div>
 
-        {/* Perfusion Valve status log overlay */}
+        {/* Lifecycle & Health event stream */}
         <div className="glass-panel" style={{ padding: '20px', flex: 1, display: 'flex', flexDirection: 'column', gap: '12px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Droplets style={{ color: 'var(--accent-cyan)' }} size={16} />
-            <h4 style={{ fontSize: '0.85rem', textTransform: 'uppercase', color: 'rgba(255,255,255,0.6)', fontWeight: 700 }}>Perfusion Flow Logs</h4>
+            <Activity style={{ color: 'var(--accent-cyan)' }} size={16} />
+            <h4 style={{ fontSize: '0.85rem', textTransform: 'uppercase', color: 'rgba(255,255,255,0.6)', fontWeight: 700 }}>Lifecycle &amp; Health Log</h4>
           </div>
           
           <div style={{ 
@@ -272,16 +291,17 @@ export const IncubatorControls: React.FC<IncubatorControlsProps> = ({
             fontFamily: 'var(--font-mono)',
             color: 'rgba(255,255,255,0.45)'
           }}>
-            {logs.filter(l => l.includes('glucose') || l.includes('viability') || l.includes('vit') || l.includes('NGF') || l.includes('Dopamine') || l.includes('GABA') || l.includes('seizure')).slice(0, 8).map((log, idx) => (
-              <div key={idx} style={{ 
+            {lifecycleLogs.map((log) => (
+              <div key={log} style={{
                 borderBottom: '1px solid rgba(255,255,255,0.02)',
-                paddingBottom: '4px'
+                paddingBottom: '4px',
+                color: log.includes('APOPTOSIS') ? 'var(--accent-red)' : log.includes('MITOSIS') ? 'var(--accent-green)' : 'rgba(255,255,255,0.55)',
               }}>
                 {log}
               </div>
             ))}
-            {logs.filter(l => l.includes('glucose') || l.includes('viability') || l.includes('vit') || l.includes('NGF') || l.includes('Dopamine') || l.includes('GABA')).length === 0 && (
-              <div style={{ textAlign: 'center', padding: '20px 0' }}>All perfusion valves running normally.</div>
+            {lifecycleLogs.length === 0 && (
+              <div style={{ textAlign: 'center', padding: '20px 0' }}>No lifecycle events yet. Cells are stable.</div>
             )}
           </div>
         </div>
