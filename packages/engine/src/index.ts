@@ -714,7 +714,6 @@ export class SynapticNetwork {
       );
       if (candidates.length > 0) {
         const parentNode = candidates[Math.floor(Math.random() * candidates.length)];
-        const parentIdx = this.electrodes.indexOf(parentNode);
 
         parentNode.mitosisCooldown = 50;
 
