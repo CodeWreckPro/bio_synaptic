@@ -203,3 +203,88 @@ describe('2D neurotransmitter diffusion', () => {
     assert.strictEqual(net.electrodes[3 + 3 * 8].gaba, net.gabaMatrix[3][3]);
   });
 });
+
+describe('Phase 1: Cell Longevity, Apoptosis, Axonal Pruning, and Mitosis', () => {
+  test('Health decay under hostile pH and temperature conditions', () => {
+    const net = new SynapticNetwork();
+    
+    // Default nodes should start at health 1.0 and age 0
+    assert.strictEqual(net.electrodes[0].health, 1.0);
+    assert.strictEqual(net.electrodes[0].age, 0);
+
+    // Set hostile pH (6.5, deviation 0.5 from [7.0, 7.6]) and hostile Temp (40°C, deviation 1.0 from [35°C, 39°C])
+    net.incubator.pH = 6.5;
+    net.incubator.temperature = 40.0;
+
+    net.tick(100);
+
+    // Deviation total = 0.5 + 1.0 = 1.5 -> healthDecay = min(1.0, 1.5 * 0.05) = 0.075
+    // Each node health should decay to 1.0 - 0.075 = 0.925
+    assert.strictEqual(net.electrodes[0].age, 1);
+    assert.ok(net.electrodes[0].health < 1.0, 'Health should decay under hostile conditions');
+    assert.strictEqual(Math.round(net.electrodes[0].health * 1000) / 1000, 0.925);
+  });
+
+  test('Synapse pruning when health falls below threshold (< 0.4)', () => {
+    const net = new SynapticNetwork();
+
+    // Set weak synapse weight on node 0
+    net.weights[0][1] = 0.15;
+    net.weights[1][0] = 0.15;
+    // Set strong synapse weight on node 0
+    net.weights[0][2] = 0.5;
+
+    // Manually reduce node 0 health to 0.35 (< 0.4)
+    net.electrodes[0].health = 0.35;
+
+    // Tick under neutral conditions so health doesn't decay to 0 immediately
+    net.incubator.pH = 7.4;
+    net.incubator.temperature = 37.0;
+    net.tick(100);
+
+    assert.strictEqual(net.electrodes[0].state, 'pruned');
+    assert.strictEqual(net.weights[0][1], 0, 'Weak connection (< 0.2) must be pruned');
+    assert.strictEqual(net.weights[1][0], 0, 'Weak incoming connection must be pruned');
+    assert.strictEqual(net.weights[0][2], 0.5, 'Strong connection (>= 0.2) must be preserved');
+  });
+
+  test('Complete node removal during apoptosis (health = 0)', () => {
+    const net = new SynapticNetwork();
+    const initialCount = net.electrodes.length;
+
+    // Set node 0 health to 0
+    net.electrodes[0].health = 0;
+    const dyingId = net.electrodes[0].id;
+
+    net.tick(100);
+
+    assert.strictEqual(net.electrodes.length, initialCount - 1, 'Apoptotic node must be removed from network');
+    assert.ok(net.electrodes.every(e => e.id !== dyingId), 'Node with dying ID must no longer exist in electrodes');
+  });
+
+  test('Spawn of new nodes during optimal mitosis conditions', () => {
+    const net = new SynapticNetwork();
+
+    // Configure optimal mitosis conditions
+    net.incubator.nutrientLevel = 0.9;
+    net.incubator.temperature = 37.0;
+    net.incubator.pH = 7.4;
+
+    // Make node 0 eligible: health > 0.9, age > 100, mitosisCooldown === 0
+    net.electrodes[0].health = 1.0;
+    net.electrodes[0].age = 105;
+    net.electrodes[0].mitosisCooldown = 0;
+
+    const initialCount = net.electrodes.length;
+    net.tick(100);
+
+    assert.strictEqual(net.electrodes.length, initialCount + 1, 'New child node should be spawned via mitosis');
+    assert.ok(net.electrodes[0].mitosisCooldown > 0, 'Parent node should get a mitosis cooldown');
+    
+    const childNode = net.electrodes[net.electrodes.length - 1];
+    assert.strictEqual(childNode.age, 0, 'Child node age should start at 0');
+    assert.strictEqual(childNode.health, 1.0, 'Child node health should start at 1.0');
+    assert.strictEqual(childNode.state, 'healthy');
+  });
+});
+
