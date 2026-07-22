@@ -120,7 +120,7 @@ export function ConnectomeGraph({ electrodes }: ConnectomeGraphProps) {
         layoutRef.current = computeLayout(electrodes.length, edges, canvas.width, canvas.height);
       }
       const positions = layoutRef.current;
-      ctx.fillStyle = 'rgba(2, 6, 12, 0.9)';
+      ctx.fillStyle = 'rgba(2, 6, 12, 0.2)';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       for (const { a, b, strength } of edges) {
