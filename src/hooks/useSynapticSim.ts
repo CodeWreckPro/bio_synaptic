@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { SynapticNetwork, Electrode as EngineElectrode } from '@ppradyoth/bio-synaptic-engine';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -6,38 +7,7 @@ export type NeuronModel = 'izhikevich' | 'hodgkin-huxley';
 export type ChemicalMatrix = number[][];
 export type MEAViewMode = 'voltage' | 'glutamate' | 'gaba';
 
-const MEA_GRID_SIZE = 8;
-const CHEMICAL_DIFFUSION_RATE = 0.2;
-const CHEMICAL_DECAY_RATE = 0.05;
-
-const createChemicalMatrix = (): ChemicalMatrix =>
-  Array.from({ length: MEA_GRID_SIZE }, () => new Array<number>(MEA_GRID_SIZE).fill(0));
-
-const diffuseChemicalMatrix = (matrix: ChemicalMatrix): ChemicalMatrix => {
-  const next = createChemicalMatrix();
-  matrix.forEach((row, y) => row.forEach((value, x) => {
-    const concentration = Math.max(0, value);
-    const neighbours: Array<[number, number]> = [];
-    if (y > 0) neighbours.push([x, y - 1]);
-    if (y < MEA_GRID_SIZE - 1) neighbours.push([x, y + 1]);
-    if (x > 0) neighbours.push([x - 1, y]);
-    if (x < MEA_GRID_SIZE - 1) neighbours.push([x + 1, y]);
-    const transported = concentration * CHEMICAL_DIFFUSION_RATE;
-    next[y][x] += concentration - transported;
-    neighbours.forEach(([nx, ny]) => { next[ny][nx] += transported / neighbours.length; });
-  }));
-  return next.map(row => row.map(value => value * (1 - CHEMICAL_DECAY_RATE)));
-};
-
-export interface Electrode {
-  id: number;
-  x: number;
-  y: number;
-  voltage: number;      // Current membrane voltage mV
-  spikeRate: number;    // Hz
-  role: 'input-a' | 'input-b' | 'motor-up' | 'motor-down' | 'interneuron';
-  lastSpikeTime: number;
-}
+export type Electrode = EngineElectrode;
 
 export type TaskType = 'logic' | 'pong' | 'waveform' | 'braille';
 
@@ -67,6 +37,8 @@ export interface SimulationVitals {
 
 export interface IncubatorParams {
   temperature: number;
+  pH: number;
+  nutrientLevel: number;
   glucose: number;
   oxygen: number;
   dopamine: number;
@@ -94,141 +66,25 @@ export interface SpikeEvent {
   t: number; // ms within 4-second raster window (0–4000)
 }
 
-// ─── Per-electrode internal neuron state (kept in refs, not React state) ─────
-
-interface IzhState { v: number; u: number; }
-interface HHState  { V: number; m: number; h: number; n: number; }
-
-// ─── Hodgkin–Huxley rate functions ────────────────────────────────────────────
-
-function hhAlphaM(V: number): number {
-  const dv = V + 40;
-  if (Math.abs(dv) < 1e-6) return 1.0;
-  return 0.1 * dv / (1 - Math.exp(-dv / 10));
-}
-function hhBetaM(V: number): number { return 4 * Math.exp(-(V + 65) / 18); }
-function hhAlphaH(V: number): number { return 0.07 * Math.exp(-(V + 65) / 20); }
-function hhBetaH(V: number): number  { return 1 / (1 + Math.exp(-(V + 35) / 10)); }
-function hhAlphaN(V: number): number {
-  const dv = V + 55;
-  if (Math.abs(dv) < 1e-6) return 0.1;
-  return 0.01 * dv / (1 - Math.exp(-dv / 10));
-}
-function hhBetaN(V: number): number { return 0.125 * Math.exp(-(V + 65) / 80); }
-
-/** Euler step of Hodgkin-Huxley (dt in ms). Returns [newState, spiked]. */
-function stepHH(s: HHState, I: number, dt: number): [HHState, boolean] {
-  const { V, m, h, n } = s;
-  const I_Na = 120 * m * m * m * h * (V - 50);
-  const I_K  = 36  * n * n * n * n * (V + 77);
-  const I_L  = 0.3 * (V + 54.4);
-  const dV = (I - I_Na - I_K - I_L); // Cm = 1 µF/cm²
-  const dm = hhAlphaM(V) * (1 - m) - hhBetaM(V) * m;
-  const dh = hhAlphaH(V) * (1 - h) - hhBetaH(V) * h;
-  const dn = hhAlphaN(V) * (1 - n) - hhBetaN(V) * n;
-  const newV = V + dV * dt;
-  const spiked = V < 0 && newV >= 0; // zero-crossing = spike
-  return [{
-    V: Math.max(-90, Math.min(60, newV)),
-    m: Math.max(0, Math.min(1, m + dm * dt)),
-    h: Math.max(0, Math.min(1, h + dh * dt)),
-    n: Math.max(0, Math.min(1, n + dn * dt)),
-  }, spiked];
-}
-
-/** Euler step of Izhikevich regular-spiking cortical neuron (dt in ms). */
-function stepIzh(s: IzhState, I: number, dt: number): [IzhState, boolean] {
-  const { v, u } = s;
-  // a=0.02, b=0.2, c=-65, d=8  (regular spiking)
-  const dv = (0.04 * v * v + 5 * v + 140 - u + I) * dt;
-  const du = (0.02 * (0.2 * v - u)) * dt;
-  const newV = v + dv;
-  if (newV >= 30) return [{ v: -65, u: u + du + 8 }, true];
-  return [{ v: Math.max(-90, newV), u: u + du }, false];
-}
-
-// ─── Burst detection (MaxInterval algorithm) ─────────────────────────────────
-
-function detectBursts(spikeTimes: number[]): { count: number; meanIBI: number } {
-  const MAX_ISI = 100;   // ms — spikes within this gap are in the same burst
-  const MIN_SPIKES = 3;  // minimum spikes to be a burst
-  if (spikeTimes.length < MIN_SPIKES) return { count: 0, meanIBI: 0 };
-
-  const burstEnds: number[] = [];
-  let burstSpikes = 1;
-  let lastBurstEnd = -Infinity;
-  const ibis: number[] = [];
-
-  for (let i = 1; i < spikeTimes.length; i++) {
-    if (spikeTimes[i] - spikeTimes[i - 1] < MAX_ISI) {
-      burstSpikes++;
-    } else {
-      if (burstSpikes >= MIN_SPIKES) {
-        const burstEnd = spikeTimes[i - 1];
-        burstEnds.push(burstEnd);
-        if (lastBurstEnd > -Infinity) ibis.push((spikeTimes[i] - lastBurstEnd) / 1000);
-        lastBurstEnd = burstEnd;
-      }
-      burstSpikes = 1;
-    }
-  }
-  // close last potential burst
-  if (burstSpikes >= MIN_SPIKES) burstEnds.push(spikeTimes[spikeTimes.length - 1]);
-
-  const meanIBI = ibis.length > 0 ? ibis.reduce((a, b) => a + b, 0) / ibis.length : 0;
-  return { count: burstEnds.length, meanIBI };
-}
-
-// ─── Ethics metrics ───────────────────────────────────────────────────────────
-
-function calcEthicsLevel(risk: number): EthicsMetrics['welfareLevel'] {
-  if (risk < 20)  return 'Safe';
-  if (risk < 45)  return 'Monitor';
-  if (risk < 70)  return 'Review Required';
-  return 'Halt Protocol';
-}
-
-interface InitialNetworkState {
-  electrodes: Electrode[];
-  izh: IzhState[];
-  hh: HHState[];
-  spikeHistory: number[][];
-}
-
-function createInitialNetwork(): InitialNetworkState {
-  const electrodes: Electrode[] = [];
-  const izh: IzhState[] = [];
-  const hh: HHState[] = [];
-  const spikeHistory: number[][] = [];
-
-  for (let y = 0; y < 8; y++) {
-    for (let x = 0; x < 8; x++) {
-      const id = y * 8 + x;
-      let role: Electrode['role'] = 'interneuron';
-      if (x === 0 && y === 2) role = 'input-a';
-      else if (x === 0 && y === 5) role = 'input-b';
-      else if (x === 7 && y === 1) role = 'motor-up';
-      else if (x === 7 && y === 6) role = 'motor-down';
-
-      electrodes.push({ id, x, y, voltage: -65 + Math.random() * 3, spikeRate: 1 + Math.random() * 2, role, lastSpikeTime: 0 });
-      izh.push({ v: -65 + Math.random() * 2, u: -14 + Math.random() });
-      hh.push({ V: -65 + Math.random() * 2, m: 0.053, h: 0.596, n: 0.318 });
-      spikeHistory.push([]);
-    }
-  }
-
-  return { electrodes, izh, hh, spikeHistory };
+// Lifecycle event stream item
+export interface LifecycleEvent {
+  timestamp: string;
+  type: 'APOPTOSIS' | 'MITOSIS' | 'PRUNING' | 'STRESS';
+  message: string;
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
 export const useSynapticSim = () => {
+  // Instance of core simulation engine
+  const networkRef = useRef<SynapticNetwork>(new SynapticNetwork());
+
   // Neuron model selection
   const [modelType, setModelType] = useState<NeuronModel>('izhikevich');
 
   // Incubator
   const [incubator, setIncubator] = useState<IncubatorParams>({
-    temperature: 37.0, glucose: 5.5, oxygen: 95, dopamine: 0.1, gaba: 0.1,
+    temperature: 37.0, pH: 7.4, nutrientLevel: 1.0, glucose: 5.5, oxygen: 95, dopamine: 0.1, gaba: 0.1,
   });
 
   // Vitals
@@ -237,12 +93,19 @@ export const useSynapticSim = () => {
     myelination: 12, learningProgress: 0, seizureActivity: false, isStarving: false,
   });
 
-  // Electrodes
-  const [initialNetwork] = useState<InitialNetworkState>(createInitialNetwork);
-  const [electrodes, setElectrodes] = useState<Electrode[]>(initialNetwork.electrodes);
-  const [glutamateMatrix, setGlutamateMatrix] = useState<ChemicalMatrix>(createChemicalMatrix);
-  const [gabaMatrix, setGabaMatrix] = useState<ChemicalMatrix>(createChemicalMatrix);
+  // Electrodes & Chemistry
+  const [electrodes, setElectrodes] = useState<Electrode[]>(networkRef.current.electrodes);
+  const [glutamateMatrix, setGlutamateMatrix] = useState<ChemicalMatrix>(networkRef.current.glutamateMatrix);
+  const [gabaMatrix, setGabaMatrix] = useState<ChemicalMatrix>(networkRef.current.gabaMatrix);
   const [meaViewMode, setMeaViewMode] = useState<MEAViewMode>('voltage');
+
+  // Phase 2 Telemetry State
+  const [cellPopulation, setCellPopulation] = useState<number>(networkRef.current.electrodes.length);
+  const [apoptosisCount, setApoptosisCount] = useState<number>(0);
+  const [mitosisCount, setMitosisCount] = useState<number>(0);
+  const [averageNetworkHealth, setAverageNetworkHealth] = useState<number>(1.0);
+  const [networkAge, setNetworkAge] = useState<number>(0);
+  const [lifecycleLogs, setLifecycleLogs] = useState<string[]>([]);
 
   // Tasks
   const [activeTask, setActiveTask] = useState<TaskType>('pong');
@@ -255,7 +118,7 @@ export const useSynapticSim = () => {
     paddleY: 50, score: 0, misses: 0, epochs: 0, successRate: 0,
   });
 
-  // Network analytics (derived from neuron models)
+  // Network analytics
   const [burstMetrics, setBurstMetrics] = useState<BurstMetrics>({
     burstFrequency: 0, meanIBI: 0, synchronyScore: 0,
     networkBursting: false, totalBursts: 0,
@@ -269,7 +132,7 @@ export const useSynapticSim = () => {
   // Raster plot snapshot (last 4 seconds of spikes)
   const [rasterEvents, setRasterEvents] = useState<SpikeEvent[]>([]);
 
-  // Logs
+  // UI Logs
   const [logs, setLogs] = useState<string[]>([
     'Synaptic simulation node initialized.',
     'Incubator heating elements engaged. 37.0°C achieved.',
@@ -279,22 +142,13 @@ export const useSynapticSim = () => {
     setLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev.slice(0, 49)]);
   }, []);
 
-  // ── Per-electrode internal neuron states (ref = no re-render) ──
-  const izhStates = useRef<IzhState[]>(initialNetwork.izh);
-  const hhStates  = useRef<HHState[]>(initialNetwork.hh);
-  // Spike history per electrode: list of absolute ms timestamps
-  const spikeHistory = useRef<number[][]>(initialNetwork.spikeHistory);
-  const simTimeMs = useRef<number>(0); // elapsed sim time in ms
-  const glutamateMatrixRef = useRef<ChemicalMatrix>(glutamateMatrix);
-  const gabaMatrixRef = useRef<ChemicalMatrix>(gabaMatrix);
-
-  // Ethics welfare log (persisted in ref to avoid stale closure)
-  const ethicsWelfareLog = useRef<string[]>([]);
+  const addLifecycleLog = useCallback((msg: string) => {
+    setLifecycleLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev.slice(0, 49)]);
+  }, []);
 
   // Stale-closure refs for the sim loop
   const incubatorRef   = useRef(incubator);
   const vitalsRef      = useRef(vitals);
-  const electrodesRef  = useRef(electrodes);
   const pongRef        = useRef(pong);
   const logicRef       = useRef(logicGate);
   const activeTaskRef  = useRef(activeTask);
@@ -303,304 +157,169 @@ export const useSynapticSim = () => {
 
   useEffect(() => { incubatorRef.current  = incubator; },  [incubator]);
   useEffect(() => { vitalsRef.current     = vitals; },     [vitals]);
-  useEffect(() => { electrodesRef.current = electrodes; }, [electrodes]);
   useEffect(() => { pongRef.current       = pong; },       [pong]);
   useEffect(() => { logicRef.current      = logicGate; },  [logicGate]);
   useEffect(() => { activeTaskRef.current = activeTask; }, [activeTask]);
   useEffect(() => { modelTypeRef.current  = modelType; },  [modelType]);
   useEffect(() => { burstMetricsRef.current = burstMetrics; }, [burstMetrics]);
 
-  // ── Initialize electrodes + neuron states ──────────────────────
   // ── Actions ─────────────────────────────────────────────────────
   const adjustIncubator = useCallback((param: keyof IncubatorParams, value: number) => {
-    setIncubator(prev => ({ ...prev, [param]: value }));
+    setIncubator(prev => {
+      const next = { ...prev, [param]: value };
+      if (networkRef.current) {
+        networkRef.current.incubator.temperature = next.temperature;
+        networkRef.current.incubator.pH = next.pH;
+        networkRef.current.incubator.nutrientLevel = next.nutrientLevel;
+        networkRef.current.incubator.glucose = next.glucose;
+        networkRef.current.incubator.oxygen = next.oxygen;
+        networkRef.current.incubator.dopamine = next.dopamine;
+        networkRef.current.incubator.gaba = next.gaba;
+      }
+      return next;
+    });
   }, []);
 
   const administerDopamine = useCallback(() => {
-    setIncubator(prev => ({ ...prev, dopamine: Math.min(prev.dopamine + 3.0, 10.0) }));
+    setIncubator(prev => {
+      const next = { ...prev, dopamine: Math.min(prev.dopamine + 3.0, 10.0) };
+      networkRef.current.incubator.dopamine = next.dopamine;
+      return next;
+    });
     addLog('Administered Dopamine surge (+3.0 µM). Plasticity coefficients amplified.');
   }, [addLog]);
 
   const administerGABA = useCallback(() => {
-    const updatedGaba = gabaMatrixRef.current.map(row => row.map(value => value + 0.15));
-    gabaMatrixRef.current = updatedGaba;
-    setGabaMatrix(updatedGaba);
-    setIncubator(prev => ({ ...prev, gaba: Math.min(prev.gaba + 3.0, 10.0) }));
+    setIncubator(prev => {
+      const next = { ...prev, gaba: Math.min(prev.gaba + 3.0, 10.0) };
+      networkRef.current.incubator.gaba = next.gaba;
+      return next;
+    });
     addLog('Administered GABA inhibitory dose (+3.0 µM). Membrane stabilisation engaged.');
   }, [addLog]);
 
   const triggerElectrodeStimulation = useCallback((id: number) => {
-    if (!Number.isInteger(id) || !electrodesRef.current.some(el => el.id === id)) return;
-
-    // Inject a depolarising current into both model states
-    if (izhStates.current[id]) izhStates.current[id].v = 30;
-    if (hhStates.current[id])  hhStates.current[id].V  = 30;
-    setElectrodes(prev => prev.map(el => el.id === id
-      ? { ...el, voltage: 40.0, lastSpikeTime: Date.now() }
-      : el
-    ));
+    if (!Number.isInteger(id) || !networkRef.current.electrodes.some((el: Electrode) => el.id === id)) return;
+    networkRef.current.stimulate(id, 30.0);
+    setElectrodes([...networkRef.current.electrodes]);
     addLog(`Manual µ-electrode stimulation pulsed on Channel ${id}.`);
   }, [addLog]);
 
   const seedStemCells = useCallback(() => {
+    networkRef.current.reset();
+    setIncubator({ temperature: 37.0, pH: 7.4, nutrientLevel: 1.0, glucose: 5.5, oxygen: 95, dopamine: 0.1, gaba: 0.1 });
     setVitals({ cellCount: 150000, synapticDensity: 10, viability: 100, myelination: 0, learningProgress: 0, seizureActivity: false, isStarving: false });
-    setIncubator({ temperature: 37.0, glucose: 5.5, oxygen: 95, dopamine: 0.1, gaba: 0.1 });
     setPong({ ballX: 50, ballY: 50, ballVX: 1.2, ballVY: 0.8, paddleY: 50, score: 0, misses: 0, epochs: 0, successRate: 0 });
     setLogicGate({ gateType: 'XOR', inputA: false, inputB: false, expectedOutput: false, actualOutput: false, accuracy: 50, epochs: 0 });
-    // Reset neuron states
-    izhStates.current  = izhStates.current.map(() => ({ v: -65 + Math.random() * 2, u: -14 + Math.random() }));
-    hhStates.current   = hhStates.current.map(() => ({ V: -65 + Math.random() * 2, m: 0.053, h: 0.596, n: 0.318 }));
-    spikeHistory.current = spikeHistory.current.map(() => []);
-    glutamateMatrixRef.current = createChemicalMatrix();
-    gabaMatrixRef.current = createChemicalMatrix();
-    setGlutamateMatrix(glutamateMatrixRef.current);
-    setGabaMatrix(gabaMatrixRef.current);
-    simTimeMs.current  = 0;
-    ethicsWelfareLog.current = [];
+    setElectrodes([...networkRef.current.electrodes]);
+    setGlutamateMatrix(networkRef.current.glutamateMatrix);
+    setGabaMatrix(networkRef.current.gabaMatrix);
+    setCellPopulation(networkRef.current.electrodes.length);
+    setApoptosisCount(0);
+    setMitosisCount(0);
+    setAverageNetworkHealth(1.0);
+    setNetworkAge(0);
+    setLifecycleLogs([]);
     addLog('Clean MEA grid prepared. Seeding neural stem cells (150,000 count). Growth loop started.');
   }, [addLog]);
 
   // ── Core Simulation Loop (100 ms interval) ──────────────────────
   useEffect(() => {
-    const TICK_MS = 100; // ms per React tick
-    // Integration step sizes
-    const HH_DT   = 0.1;  // ms — HH needs fine steps
-    const IZH_DT  = 0.5;  // ms — Izhikevich is stable at coarser steps
-    const RASTER_WINDOW = 4000; // ms to display in raster
+    const TICK_MS = 100;
 
     const simTick = setInterval(() => {
-      const inc      = incubatorRef.current;
-      const vit      = vitalsRef.current;
-      const els      = electrodesRef.current;
+      const net = networkRef.current;
+      const inc = incubatorRef.current;
+      const vit = vitalsRef.current;
       const currTask = activeTaskRef.current;
-      const model    = modelTypeRef.current;
+      const model = modelTypeRef.current;
 
-      if (els.length === 0) return;
+      // Sync incubator controls from UI state
+      net.incubator.temperature = inc.temperature;
+      net.incubator.pH = inc.pH;
+      net.incubator.nutrientLevel = inc.nutrientLevel;
+      net.incubator.glucose = inc.glucose;
+      net.incubator.oxygen = inc.oxygen;
+      net.incubator.dopamine = inc.dopamine;
+      net.incubator.gaba = inc.gaba;
 
-      simTimeMs.current += TICK_MS;
-      const now = simTimeMs.current;
+      const prevIds = new Set(net.electrodes.map((e: Electrode) => e.id));
 
-      // ── 1. BIOCHEMICAL ENVIRONMENT ───────────────────────────────
-      const tempDev = Math.abs(inc.temperature - 37.0);
-      const glucDev = inc.glucose < 2.0 ? (2.0 - inc.glucose) : 0;
-      const oxyDev  = inc.oxygen  < 80  ? (80  - inc.oxygen)  : 0;
-      const bioScore = Math.max(0, 100 - tempDev * 15 - glucDev * 20 - oxyDev * 1.5);
+      // Tick core engine physics and longevity
+      net.tick(TICK_MS, model);
+
+      const currentNodes = net.electrodes;
+      const currentIds = new Set(currentNodes.map((e: Electrode) => e.id));
+
+      // Detect Apoptosis & Mitosis events for logging and counts
+      const deadNodes = [...prevIds].filter(id => !currentIds.has(id));
+      const spawnedNodes = [...currentIds].filter(id => !prevIds.has(id));
+
+      if (deadNodes.length > 0) {
+        setApoptosisCount(prev => prev + deadNodes.length);
+        const cause = (inc.pH < 7.0 || inc.pH > 7.6)
+          ? `acidic/alkaline pH (${inc.pH.toFixed(1)})`
+          : (inc.temperature < 35 || inc.temperature > 39)
+          ? `extreme temperature (${inc.temperature.toFixed(1)}°C)`
+          : 'cellular stress';
+        deadNodes.forEach(id => {
+          addLifecycleLog(`[APOPTOSIS] Cell #${id} died due to ${cause}.`);
+        });
+      }
+
+      if (spawnedNodes.length > 0) {
+        setMitosisCount(prev => prev + spawnedNodes.length);
+        spawnedNodes.forEach(id => {
+          addLifecycleLog(`[MITOSIS] Cell #${id} spawned via optimal nutrient division.`);
+        });
+      }
+
+      // Update Phase 2 Real-Time Telemetry
+      const totalHealth = currentNodes.reduce((sum: number, node: Electrode) => sum + node.health, 0);
+      const avgHealth = currentNodes.length > 0 ? totalHealth / currentNodes.length : 0;
+      setCellPopulation(currentNodes.length);
+      setAverageNetworkHealth(Math.round(avgHealth * 1000) / 1000);
+      setNetworkAge(prev => prev + 1);
+
+      // Sync React states
+      setElectrodes([...currentNodes]);
+      setGlutamateMatrix(net.glutamateMatrix.map((r: number[]) => [...r]));
+      setGabaMatrix(net.gabaMatrix.map((r: number[]) => [...r]));
+
+      // Environmental warning logs
       const starving = inc.glucose < 3.0 || inc.oxygen < 85;
-
-      let newCellCount  = vit.cellCount;
-      const newViability = Math.max(0, Math.min(100, Math.round(bioScore)));
-
-      if (newViability < 60) {
-        newCellCount = Math.max(2000, Math.round(newCellCount - (60 - newViability) * 50));
-      } else if (newViability > 90 && newCellCount < 800000 && Math.random() > 0.7) {
-        newCellCount = Math.min(800000, newCellCount + 120);
-      }
-
-      let newSynapticDensity = vit.synapticDensity;
-      if (newViability > 85) {
-        newSynapticDensity = Math.min(4500, newSynapticDensity + (Math.random() > 0.5 ? 2 : 0));
-      } else if (newViability < 70) {
-        newSynapticDensity = Math.max(10, newSynapticDensity - 4);
-      }
-
-      let newMyelination = vit.myelination;
-      if (newViability > 90 && newSynapticDensity > 500 && Math.random() > 0.9) {
-        newMyelination = Math.min(100, newMyelination + 1);
-      } else if (newViability < 65) {
-        newMyelination = Math.max(0, newMyelination - 2);
-      }
-
-      // Chemical decay
-      const newDopamine = Math.max(0.1, inc.dopamine - 0.08);
-      const newGaba     = Math.max(0.1, inc.gaba - 0.08);
-      const cellMeta    = (newCellCount / 500000) * 0.015;
-      const newGlucose  = Math.max(0, inc.glucose - cellMeta);
-      const newOxygen   = Math.max(0, inc.oxygen  - cellMeta * 2);
-
-      setIncubator(prev => ({
-        ...prev,
-        glucose:  Math.round(newGlucose  * 100) / 100,
-        oxygen:   Math.round(newOxygen   * 10)  / 10,
-        dopamine: Math.round(newDopamine * 100) / 100,
-        gaba:     Math.round(newGaba     * 100) / 100,
-      }));
-
       if (starving && !vit.isStarving) addLog('WARNING: Vitals declining. Incubator oxygen/glucose depleted. Cells under heavy stress.');
       if (!starving && vit.isStarving)  addLog('Vitals recovered. Homeostasis re-established inside incubator.');
 
-      // ── 2. NEURON MODEL INTEGRATION (HH or Izhikevich) ───────────
-      // Base excitatory drive: maps viability + neurotransmitters → input current
-      const baseI    = (newViability / 100) * 6.0;
-      const dopBoost = inc.dopamine * 1.5;
-      const gabaInh  = inc.gaba * 1.2;
-      const networkI = Math.max(0, baseI + dopBoost - gabaInh);
-
-      const dt       = model === 'hodgkin-huxley' ? HH_DT : IZH_DT;
-      const steps    = Math.round(TICK_MS / dt);
-
-      const tickSpikes: boolean[] = new Array(els.length).fill(false);
-      const newVoltages: number[] = new Array(els.length).fill(-65);
-
-      for (let eIdx = 0; eIdx < els.length; eIdx++) {
-        // Per-electrode current: base + noise + task stimulation
-        const noise   = (Math.random() - 0.5) * 2.0;
-        const localGlutamate = glutamateMatrixRef.current[els[eIdx].y][els[eIdx].x];
-        const localGaba = gabaMatrixRef.current[els[eIdx].y][els[eIdx].x];
-        const elI = Math.max(0, networkI + localGlutamate * 2.0 - localGaba * 2.0 + noise);
-        let spikedThisTick = false;
-        let finalV: number;
-
-        if (model === 'hodgkin-huxley') {
-          let s = hhStates.current[eIdx];
-          for (let step = 0; step < steps; step++) {
-            const [ns, spike] = stepHH(s, elI, dt);
-            s = ns;
-            if (spike) spikedThisTick = true;
-          }
-          hhStates.current[eIdx] = s;
-          finalV = s.V;
-        } else {
-          let s = izhStates.current[eIdx];
-          for (let step = 0; step < steps; step++) {
-            const [ns, spike] = stepIzh(s, elI, dt);
-            s = ns;
-            if (spike) spikedThisTick = true;
-          }
-          izhStates.current[eIdx] = s;
-          finalV = s.v;
-        }
-
-        tickSpikes[eIdx] = spikedThisTick;
-        newVoltages[eIdx] = finalV;
-        if (spikedThisTick) {
-          spikeHistory.current[eIdx].push(now);
-        }
-      }
-
-      // Action potentials release glutamate locally; both fields then diffuse
-      // to orthogonal neighbours and clear by 5% per simulation tick.
-      const releasedGlutamate = glutamateMatrixRef.current.map(row => [...row]);
-      tickSpikes.forEach((spiked, index) => {
-        if (!spiked) return;
-        const electrode = els[index];
-        releasedGlutamate[electrode.y][electrode.x] += 0.25;
-      });
-      const nextGlutamate = diffuseChemicalMatrix(releasedGlutamate);
-      const nextGaba = diffuseChemicalMatrix(gabaMatrixRef.current);
-      glutamateMatrixRef.current = nextGlutamate;
-      gabaMatrixRef.current = nextGaba;
-      setGlutamateMatrix(nextGlutamate);
-      setGabaMatrix(nextGaba);
-
-      // Trim spike history to last 60 seconds
-      const keepAfter = now - 60000;
-      for (let i = 0; i < spikeHistory.current.length; i++) {
-        const hist = spikeHistory.current[i];
-        const trimIdx = hist.findIndex(t => t >= keepAfter);
-        if (trimIdx > 0) spikeHistory.current[i] = hist.slice(trimIdx);
-        else if (trimIdx === -1) spikeHistory.current[i] = [];
-      }
-
       // ── 3. BURST DETECTION & SYNCHRONY ───────────────────────────
-      // Use last 60s of spike history for burst analysis
-      const burstResults = spikeHistory.current.map(hist => detectBursts(hist));
-      const totalBursts  = burstResults.reduce((a, b) => a + b.count, 0);
-      const validIBIs    = burstResults.filter(b => b.meanIBI > 0).map(b => b.meanIBI);
-      const meanIBI      = validIBIs.length > 0 ? validIBIs.reduce((a, b) => a + b, 0) / validIBIs.length : 0;
-
-      // Synchrony: fraction of electrodes that spiked this tick
-      const spikingCount  = tickSpikes.filter(Boolean).length;
-      const synchrony     = spikingCount / els.length;
-      const avgSyncRolled = synchrony * 0.1 + burstMetricsRef.current.synchronyScore * 0.9; // smoothed
-
-      const burstFreq = totalBursts > 0
-        ? Math.round((totalBursts / Math.max(1, now / 60000)) * 10) / 10
-        : 0;
-
-      const newBurstMetrics: BurstMetrics = {
-        burstFrequency: burstFreq,
-        meanIBI: Math.round(meanIBI * 100) / 100,
-        synchronyScore: Math.round(avgSyncRolled * 100) / 100,
-        networkBursting: synchrony > 0.4,
-        totalBursts,
-      };
-      burstMetricsRef.current = newBurstMetrics;
-      setBurstMetrics(newBurstMetrics);
+      const bm = net.getBurstMetrics();
+      setBurstMetrics(bm);
 
       // ── 4. ETHICS METRICS ─────────────────────────────────────────
-      const phiProxy = Math.round(
-        avgSyncRolled *
-        Math.log(1 + newCellCount / 10000) *
-        (newSynapticDensity / 500) * 10
-      ) / 10;
-      const sentienceRisk = Math.min(100, Math.round(phiProxy * 15));
-      const welfareLevel  = calcEthicsLevel(sentienceRisk);
+      const em = net.getEthicsMetrics();
+      setEthicsMetrics(em);
 
-      // Auto-log threshold crossings
-      if (welfareLevel === 'Review Required' && ethicsWelfareLog.current.every(l => !l.includes('Review'))) {
-        const entry = `[${new Date().toLocaleTimeString()}] IIT-Φ proxy = ${phiProxy.toFixed(1)}. Network complexity crossed Review threshold. Baltimore Declaration review protocol triggered.`;
-        ethicsWelfareLog.current = [entry, ...ethicsWelfareLog.current.slice(0, 19)];
-        addLog('⚖️ ETHICS ALERT: Sentience review threshold crossed. See Ethics Panel.');
-      }
-      if (welfareLevel === 'Halt Protocol' && ethicsWelfareLog.current.every(l => !l.includes('Halt'))) {
-        const entry = `[${new Date().toLocaleTimeString()}] HALT PROTOCOL triggered. Φ proxy = ${phiProxy.toFixed(1)}. Administer GABA immediately.`;
-        ethicsWelfareLog.current = [entry, ...ethicsWelfareLog.current.slice(0, 19)];
-        addLog('🛑 ETHICS HALT: Organoid complexity too high. Protocol paused. Administer GABA.');
-      }
+      // ── 5. RASTER SNAPSHOT ────────────────────────────────────────
+      const raster = net.getRasterEvents(4000);
+      setRasterEvents(raster);
 
-      setEthicsMetrics({
-        phiProxy,
-        sentienceRisk,
-        welfareLevel,
-        welfareLog: [...ethicsWelfareLog.current],
-      });
-
-      // ── 5. RASTER SNAPSHOT (last 4 seconds) ──────────────────────
-      const rasterCutoff = now - RASTER_WINDOW;
-      const newRaster: SpikeEvent[] = [];
-      for (let eIdx = 0; eIdx < spikeHistory.current.length; eIdx++) {
-        for (const t of spikeHistory.current[eIdx]) {
-          if (t >= rasterCutoff) {
-            newRaster.push({ electrodeId: eIdx, t: t - rasterCutoff });
-          }
-        }
-      }
-      setRasterEvents(newRaster);
-
-      // ── 6. UPDATE ELECTRODE DISPLAY STATE ────────────────────────
-      const updatedElectrodes = els.map((el, idx) => {
-        const spiked   = tickSpikes[idx];
-        const newRate  = spiked
-          ? Math.max(0.1, Math.min(100, el.spikeRate * 0.8 + 20 * 0.2))
-          : Math.max(0.1, el.spikeRate * 0.95);
-        return {
-          ...el,
-          voltage: Math.round(newVoltages[idx] * 10) / 10,
-          spikeRate: Math.round(newRate * 10) / 10,
-          lastSpikeTime: spiked ? Date.now() : el.lastSpikeTime,
-        };
-      });
-
-      // ── 7. PONG TASK ─────────────────────────────────────────────
+      // ── 6. PONG TASK ─────────────────────────────────────────────
       let updatedLearningProgress = vit.learningProgress;
 
-      if (currTask === 'pong' && newCellCount > 10000 && newViability > 50) {
+      if (currTask === 'pong' && vit.cellCount > 10000 && net.vitals.viability > 50 && currentNodes.length > 0) {
         const p = { ...pongRef.current };
-        const motorUp   = updatedElectrodes.find(e => e.role === 'motor-up')?.spikeRate   ?? 1;
-        const motorDown = updatedElectrodes.find(e => e.role === 'motor-down')?.spikeRate ?? 1;
-        const learningEff = (newSynapticDensity / 1500) * (1 + inc.dopamine * 0.4) / (1 + inc.gaba * 0.2);
+        const motorUp   = currentNodes.find((e: Electrode) => e.role === 'motor-up')?.spikeRate   ?? 1;
+        const motorDown = currentNodes.find((e: Electrode) => e.role === 'motor-down')?.spikeRate ?? 1;
+        const learningEff = (vit.synapticDensity / 1500) * (1 + inc.dopamine * 0.4) / (1 + inc.gaba * 0.2);
         const speed = Math.min(3.5, Math.abs(motorUp - motorDown) * 0.5);
         const trackSpeed = 1.0 + learningEff * 2.5;
 
-        // Sensory input to electrodes
-        updatedElectrodes.forEach(c => {
+        currentNodes.forEach((c: Electrode) => {
           if (c.role === 'input-a' && p.ballY < p.paddleY) {
-            izhStates.current[c.id].v = 15;
-            hhStates.current[c.id].V = 15;
+            net.stimulate(c.id, 15);
           }
           if (c.role === 'input-b' && p.ballY > p.paddleY) {
-            izhStates.current[c.id].v = 15;
-            hhStates.current[c.id].V = 15;
+            net.stimulate(c.id, 15);
           }
         });
 
@@ -629,8 +348,8 @@ export const useSynapticSim = () => {
         updatedLearningProgress = p.successRate;
       }
 
-      // ── 8. LOGIC GATE TASK ────────────────────────────────────────
-      if (currTask === 'logic' && newCellCount > 10000 && newViability > 50) {
+      // ── 7. LOGIC GATE TASK ────────────────────────────────────────
+      if (currTask === 'logic' && vit.cellCount > 10000 && net.vitals.viability > 50 && currentNodes.length > 0) {
         const lg = { ...logicRef.current };
         if (lg.epochs === 0 || Math.random() > 0.92) {
           lg.inputA = Math.random() > 0.5;
@@ -640,18 +359,12 @@ export const useSynapticSim = () => {
             case 'OR':  lg.expectedOutput = lg.inputA || lg.inputB; break;
             case 'XOR': lg.expectedOutput = lg.inputA !== lg.inputB; break;
           }
-          const chA = updatedElectrodes.find(e => e.role === 'input-a');
-          const chB = updatedElectrodes.find(e => e.role === 'input-b');
-          if (chA && lg.inputA) {
-            izhStates.current[chA.id].v = 20;
-            hhStates.current[chA.id].V = 20;
-          }
-          if (chB && lg.inputB) {
-            izhStates.current[chB.id].v = 20;
-            hhStates.current[chB.id].V = 20;
-          }
+          const chA = currentNodes.find(e => e.role === 'input-a');
+          const chB = currentNodes.find(e => e.role === 'input-b');
+          if (chA && lg.inputA) net.stimulate(chA.id, 20);
+          if (chB && lg.inputB) net.stimulate(chB.id, 20);
           lg.epochs += 1;
-          const weight = Math.min(0.98, 0.4 + (newSynapticDensity / 1500) * 0.1 + inc.dopamine * 0.05);
+          const weight = Math.min(0.98, 0.4 + (vit.synapticDensity / 1500) * 0.1 + inc.dopamine * 0.05);
           lg.actualOutput = Math.random() < weight ? lg.expectedOutput : !lg.expectedOutput;
           lg.accuracy = lg.actualOutput === lg.expectedOutput
             ? Math.min(100, Math.round(lg.accuracy * 0.95 + 5))
@@ -661,27 +374,29 @@ export const useSynapticSim = () => {
         }
       }
 
-      const seizure = avgSyncRolled > 0.7;
-      if (seizure && !vit.seizureActivity) addLog('CRITICAL: Seizure activity detected. Neurons hyper-synchronized. Administer GABA.');
-
       setVitals({
-        cellCount: newCellCount, synapticDensity: newSynapticDensity,
-        viability: newViability, myelination: newMyelination,
+        cellCount: net.vitals.cellCount,
+        synapticDensity: net.vitals.synapticDensity,
+        viability: net.vitals.viability,
+        myelination: net.vitals.myelination,
         learningProgress: updatedLearningProgress,
-        seizureActivity: seizure, isStarving: starving,
+        seizureActivity: net.vitals.seizureActivity,
+        isStarving: starving,
       });
-      setElectrodes(updatedElectrodes);
 
     }, TICK_MS);
 
     return () => clearInterval(simTick);
-  }, [addLog]);
+  }, [addLog, addLifecycleLog]);
 
   return {
     incubator, vitals, activeTask, logicGate, pong,
     electrodes, logs, burstMetrics, ethicsMetrics, rasterEvents,
     glutamateMatrix, gabaMatrix, meaViewMode, setMeaViewMode,
     modelType, setModelType,
+    // Phase 2 Telemetry & Lifecycle Stream
+    cellPopulation, apoptosisCount, mitosisCount, averageNetworkHealth, networkAge,
+    lifecycleLogs,
     adjustIncubator, administerDopamine, administerGABA,
     triggerElectrodeStimulation, seedStemCells,
     setActiveTask,
@@ -690,3 +405,4 @@ export const useSynapticSim = () => {
     addLog,
   };
 };
+
