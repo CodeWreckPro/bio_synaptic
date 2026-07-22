@@ -20,8 +20,7 @@ export type NeuronModel = 'izhikevich' | 'hodgkin-huxley';
 /** Firing types for cortical and subcortical neurons */
 export type CorticalPreset = 'RS' | 'IB' | 'CH' | 'FS' | 'LTS';
 
-/** Represents a single micro-electrode channel on an 8x8 MEA Grid */
-export interface Electrode {
+export interface NeuronNode {
   id: number;
   x: number;
   y: number;
@@ -31,7 +30,14 @@ export interface Electrode {
   lastSpikeTime: number;
   glutamate: number;    // Local extracellular excitatory transmitter concentration
   gaba: number;         // Local extracellular inhibitory transmitter concentration
+  age: number;          // tick count
+  health: number;       // 0.0 to 1.0, default 1.0
+  state: 'healthy' | 'stressed' | 'pruned' | 'apoptotic';
+  mitosisCooldown: number; // ticks remaining until able to divide
 }
+
+/** Represents a single micro-electrode channel on an 8x8 MEA Grid (alias for NeuronNode) */
+export type Electrode = NeuronNode;
 
 /** A row-major concentration field aligned with the MEA's 2D coordinates. */
 export type ChemicalMatrix = number[][];
@@ -90,11 +96,13 @@ export function diffuseChemicalMatrix(
 
 /** Bioreactor incubator environment parameters */
 export interface IncubatorParams {
-  temperature: number; // in °C (ideal is 37.0)
-  glucose: number;     // in mM (metabolized by cellular activity)
-  oxygen: number;      // in % dissolved oxygen
-  dopamine: number;    // in µM (modulates synaptic plasticity)
-  gaba: number;        // in µM (modulates synaptic inhibition and stabilizes voltages)
+  temperature: number;   // in °C (ideal is 37.0)
+  pH?: number;           // pH level (ideal is 7.4, optimal [7.0, 7.6])
+  nutrientLevel?: number;// 0.0 to 1.0
+  glucose: number;       // in mM (metabolized by cellular activity)
+  oxygen: number;        // in % dissolved oxygen
+  dopamine: number;      // in µM (modulates synaptic plasticity)
+  gaba: number;          // in µM (modulates synaptic inhibition and stabilizes voltages)
 }
 
 /** Biological health vitals of the organoid neural population */
@@ -527,6 +535,10 @@ export class SynapticNetwork {
           lastSpikeTime: 0,
           glutamate: 0,
           gaba: 0,
+          age: 0,
+          health: 1.0,
+          state: 'healthy',
+          mitosisCooldown: 0,
         });
 
         this.izhStates.push({
@@ -608,7 +620,155 @@ export class SynapticNetwork {
     this.elapsedSimTime += tickMs;
     const now = this.elapsedSimTime;
 
-    // ── 1. METABOLIC / BIOCHEMICAL KINETICS ──────────────────────
+    // ── 1. METABOLIC / BIOCHEMICAL KINETICS & CELL LONGEVITY ──────
+    const currentTemp = this.incubator.temperature;
+    const currentPH = this.incubator.pH ?? 7.4;
+    const currentNutrient = this.incubator.nutrientLevel ?? 1.0;
+
+    let phDeviation = 0;
+    if (currentPH < 7.0) phDeviation = 7.0 - currentPH;
+    else if (currentPH > 7.6) phDeviation = currentPH - 7.6;
+
+    let tempDeviation = 0;
+    if (currentTemp < 35.0) tempDeviation = 35.0 - currentTemp;
+    else if (currentTemp > 39.0) tempDeviation = currentTemp - 39.0;
+
+    const totalDev = phDeviation + tempDeviation;
+    const healthDecay = totalDev > 0 ? Math.min(1.0, totalDev * 0.05) : 0;
+
+    // Process longevity, health, pruning, and cooldowns for each node
+    for (let i = 0; i < this.electrodes.length; i++) {
+      const node = this.electrodes[i];
+      node.age += 1;
+      if (node.mitosisCooldown > 0) {
+        node.mitosisCooldown -= 1;
+      }
+
+      if (healthDecay > 0) {
+        node.health = Math.max(0, node.health - healthDecay);
+      } else if (node.health > 0) {
+        // Recovery in optimal conditions for surviving cells
+        node.health = Math.min(1.0, node.health + 0.01);
+      }
+
+      // Update state & Axonal Pruning
+      if (node.health <= 0) {
+        node.state = 'apoptotic';
+      } else if (node.health < 0.4) {
+        node.state = 'pruned';
+        // Prune weakest connections (< 0.2)
+        if (this.weights[i]) {
+          for (let j = 0; j < this.weights.length; j++) {
+            if (this.weights[i][j] < 0.2) this.weights[i][j] = 0;
+            if (this.weights[j] && this.weights[j][i] < 0.2) this.weights[j][i] = 0;
+          }
+        }
+      } else if (node.health < 0.8) {
+        node.state = 'stressed';
+      } else {
+        node.state = 'healthy';
+      }
+    }
+
+    // Apoptosis handling: sever all connections & remove apoptotic nodes
+    const apoptoticIndices: number[] = [];
+    for (let i = 0; i < this.electrodes.length; i++) {
+      if (this.electrodes[i].state === 'apoptotic') {
+        apoptoticIndices.push(i);
+      }
+    }
+
+    if (apoptoticIndices.length > 0) {
+      // Sever all incoming and outgoing connections
+      for (const idx of apoptoticIndices) {
+        if (this.weights[idx]) {
+          for (let j = 0; j < this.weights.length; j++) {
+            this.weights[idx][j] = 0;
+            if (this.weights[j]) this.weights[j][idx] = 0;
+          }
+        }
+      }
+
+      // Remove from active node registry and parallel arrays (reverse order to preserve indices)
+      for (let k = apoptoticIndices.length - 1; k >= 0; k--) {
+        const idx = apoptoticIndices[k];
+        this.electrodes.splice(idx, 1);
+        this.izhStates.splice(idx, 1);
+        this.hhStates.splice(idx, 1);
+        this.spikeHistory.splice(idx, 1);
+        this.lastSpikeTimings.splice(idx, 1);
+
+        // Remove row and column from weights matrix
+        this.weights.splice(idx, 1);
+        for (let r = 0; r < this.weights.length; r++) {
+          this.weights[r].splice(idx, 1);
+        }
+      }
+    }
+
+    // Mitosis handling
+    const maxNodeThreshold = 128;
+    if (currentNutrient > 0.85 && this.electrodes.length < maxNodeThreshold) {
+      const candidates = this.electrodes.filter(
+        n => n.health > 0.9 && n.age > 100 && n.mitosisCooldown === 0
+      );
+      if (candidates.length > 0) {
+        const parentNode = candidates[Math.floor(Math.random() * candidates.length)];
+        const parentIdx = this.electrodes.indexOf(parentNode);
+
+        parentNode.mitosisCooldown = 50;
+
+        const offsetX = (Math.random() - 0.5) * 0.5;
+        const offsetY = (Math.random() - 0.5) * 0.5;
+        const childX = Math.max(0, Math.min(7, Math.round((parentNode.x + offsetX) * 10) / 10));
+        const childY = Math.max(0, Math.min(7, Math.round((parentNode.y + offsetY) * 10) / 10));
+
+        const newId = this.electrodes.length > 0
+          ? Math.max(...this.electrodes.map(e => e.id)) + 1
+          : 0;
+
+        const childNode: NeuronNode = {
+          id: newId,
+          x: childX,
+          y: childY,
+          voltage: -65.0,
+          spikeRate: 1.0,
+          role: 'interneuron',
+          lastSpikeTime: 0,
+          glutamate: 0,
+          gaba: 0,
+          age: 0,
+          health: 1.0,
+          state: 'healthy',
+          mitosisCooldown: 50,
+        };
+
+        const childIdx = this.electrodes.length;
+        this.electrodes.push(childNode);
+        this.izhStates.push({ v: -65.0, u: -14.0 });
+        this.hhStates.push({ V: -65.0, m: 0.053, h: 0.596, n: 0.318 });
+        this.spikeHistory.push([]);
+        this.lastSpikeTimings.push(-Infinity);
+
+        // Expand weights matrix
+        this.weights[childIdx] = new Array(childIdx + 1).fill(0);
+        for (let r = 0; r < childIdx; r++) {
+          this.weights[r].push(0);
+        }
+
+        // Initialize weak synaptic connections to neighboring nodes
+        for (let r = 0; r < childIdx; r++) {
+          const neighbor = this.electrodes[r];
+          const dist = Math.hypot(childNode.x - neighbor.x, childNode.y - neighbor.y);
+          if (dist <= 3.0) {
+            const w = Math.random() * 0.15;
+            this.weights[childIdx][r] = w;
+            this.weights[r][childIdx] = w;
+          }
+        }
+      }
+    }
+
     const tempDev = Math.abs(this.incubator.temperature - 37.0);
     const glucDev = this.incubator.glucose < 2.0 ? (2.0 - this.incubator.glucose) : 0;
     const oxyDev  = this.incubator.oxygen  < 80  ? (80  - this.incubator.oxygen)  : 0;
@@ -659,15 +819,16 @@ export class SynapticNetwork {
     const dt = model === 'hodgkin-huxley' ? 0.1 : 0.5; // Integration step
     const steps = Math.round(tickMs / dt);
 
-    const activeSpikes: boolean[] = new Array(64).fill(false);
+    const nodeCount = this.electrodes.length;
+    const activeSpikes: boolean[] = new Array(nodeCount).fill(false);
 
     // Solve for each node
-    for (let i = 0; i < 64; i++) {
+    for (let i = 0; i < nodeCount; i++) {
       const noise = (Math.random() - 0.5) * 2.0;
 
       // Integrate synaptic currents from upstream spiked connections
       let synapticI = 0.0;
-      for (let j = 0; j < 64; j++) {
+      for (let j = 0; j < nodeCount; j++) {
         if (i !== j && this.weights[j][i] > 0) {
           // If node j spiked recently, it injects current proportional to synaptic weight
           const timeSinceUpstreamSpike = now - this.lastSpikeTimings[j];
@@ -677,8 +838,10 @@ export class SynapticNetwork {
         }
       }
 
-      const localGlutamate = this.glutamateMatrix[this.electrodes[i].y][this.electrodes[i].x];
-      const localGaba = this.gabaMatrix[this.electrodes[i].y][this.electrodes[i].x];
+      const gridY = Math.max(0, Math.min(7, Math.floor(this.electrodes[i].y)));
+      const gridX = Math.max(0, Math.min(7, Math.floor(this.electrodes[i].x)));
+      const localGlutamate = this.glutamateMatrix[gridY][gridX];
+      const localGaba = this.gabaMatrix[gridY][gridX];
       const chemicalDrive = localGlutamate * 2.0 - localGaba * 2.0;
       const totalStimulus = Math.max(0, globalExcitatoryDrive + synapticI + chemicalDrive + noise);
       let didSpike = false;
@@ -715,7 +878,7 @@ export class SynapticNetwork {
       if (didSpike) {
         this.spikeHistory[i].push(now);
         this.electrodes[i].lastSpikeTime = now;
-        this.releaseChemical(this.electrodes[i].x, this.electrodes[i].y, 0.25);
+        this.releaseChemical(gridX, gridY, 0.25);
         
         // ── 3. SPIKE-TIMING-DEPENDENT PLASTICITY (STDP) ───────────
         // Modulated heavily by Dopamine levels (plasticity factor)
@@ -725,7 +888,7 @@ export class SynapticNetwork {
 
         this.lastSpikeTimings[i] = now;
 
-        for (let j = 0; j < 64; j++) {
+        for (let j = 0; j < nodeCount; j++) {
           if (i === j) continue;
 
           // If pre-synaptic i fired, check when post-synaptic j fired:
@@ -747,13 +910,15 @@ export class SynapticNetwork {
     this.glutamateMatrix = diffuseChemicalMatrix(this.glutamateMatrix, this.chemicalDiffusion);
     this.gabaMatrix = diffuseChemicalMatrix(this.gabaMatrix, this.chemicalDiffusion);
     this.electrodes.forEach((electrode) => {
-      electrode.glutamate = this.glutamateMatrix[electrode.y][electrode.x];
-      electrode.gaba = this.gabaMatrix[electrode.y][electrode.x];
+      const gY = Math.max(0, Math.min(7, Math.floor(electrode.y)));
+      const gX = Math.max(0, Math.min(7, Math.floor(electrode.x)));
+      electrode.glutamate = this.glutamateMatrix[gY][gX];
+      electrode.gaba = this.gabaMatrix[gY][gX];
     });
 
     // Trim historical logs to prevent memory overflow
     const trimCutoff = now - 60000;
-    for (let i = 0; i < 64; i++) {
+    for (let i = 0; i < this.electrodes.length; i++) {
       const hist = this.spikeHistory[i];
       const trimIdx = hist.findIndex((t) => t >= trimCutoff);
       if (trimIdx > 0) this.spikeHistory[i] = hist.slice(trimIdx);
@@ -782,8 +947,9 @@ export class SynapticNetwork {
 
     // Network Synchrony: standard deviation coefficient of firing rates
     const rates = this.electrodes.map((e) => e.spikeRate);
-    const avg = rates.reduce((a, b) => a + b, 0) / 64;
-    const variance = rates.reduce((a, b) => a + (b - avg) ** 2, 0) / 64;
+    const n = Math.max(1, rates.length);
+    const avg = rates.reduce((a, b) => a + b, 0) / n;
+    const variance = rates.reduce((a, b) => a + (b - avg) ** 2, 0) / n;
     const synchrony = Math.min(1.0, Math.max(0.0, variance / (avg * avg + 1.0)));
 
     const networkBursting = synchrony > 0.45;
@@ -836,10 +1002,10 @@ export class SynapticNetwork {
     const cutoff = this.elapsedSimTime - windowMs;
     const events: SpikeEvent[] = [];
 
-    for (let i = 0; i < 64; i++) {
+    for (let i = 0; i < this.electrodes.length; i++) {
       for (const t of this.spikeHistory[i]) {
         if (t >= cutoff) {
-          events.push({ electrodeId: i, t: t - cutoff });
+          events.push({ electrodeId: this.electrodes[i].id, t: t - cutoff });
         }
       }
     }
