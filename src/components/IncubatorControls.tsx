@@ -145,6 +145,56 @@ export const IncubatorControls: React.FC<IncubatorControlsProps> = ({
               </span>
             </div>
           </div>
+
+          {/* pH Level Slider */}
+          <div className="glass-card" style={{ display: 'grid', gridTemplateColumns: '120px 1fr 120px', gap: '20px', alignItems: 'center' }}>
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              <span style={{ fontSize: '0.875rem', fontWeight: 600, color: '#fff' }}>pH Balance</span>
+              <span style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.4)', marginTop: '2px' }}>Target: 7.4</span>
+            </div>
+            <input
+              type="range"
+              min="6.0"
+              max="8.5"
+              step="0.1"
+              value={incubator.pH}
+              onChange={(e) => adjustIncubator('pH', parseFloat(e.target.value))}
+              className="slider-amber"
+            />
+            <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column' }}>
+              <span className="font-telemetry" style={{ fontSize: '1.25rem', fontWeight: 700, color: (incubator.pH < 7.0 || incubator.pH > 7.6) ? 'var(--accent-red)' : 'var(--accent-green)' }}>
+                {incubator.pH.toFixed(1)}
+              </span>
+              <span style={{ fontSize: '0.65rem', color: (incubator.pH < 7.0 || incubator.pH > 7.6) ? 'var(--accent-red)' : 'var(--accent-green)', fontWeight: 600, textTransform: 'uppercase' }}>
+                {(incubator.pH < 7.0 || incubator.pH > 7.6) ? 'OUT OF BOUNDS' : 'OPTIMAL'}
+              </span>
+            </div>
+          </div>
+
+          {/* Nutrient Level Slider */}
+          <div className="glass-card" style={{ display: 'grid', gridTemplateColumns: '120px 1fr 120px', gap: '20px', alignItems: 'center' }}>
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              <span style={{ fontSize: '0.875rem', fontWeight: 600, color: '#fff' }}>Nutrient Medium</span>
+              <span style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.4)', marginTop: '2px' }}>Optimal &gt; 0.85</span>
+            </div>
+            <input
+              type="range"
+              min="0.0"
+              max="1.0"
+              step="0.05"
+              value={incubator.nutrientLevel}
+              onChange={(e) => adjustIncubator('nutrientLevel', parseFloat(e.target.value))}
+              className="slider-cyan"
+            />
+            <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column' }}>
+              <span className="font-telemetry" style={{ fontSize: '1.25rem', fontWeight: 700, color: incubator.nutrientLevel > 0.85 ? 'var(--accent-green)' : 'var(--accent-amber)' }}>
+                {(incubator.nutrientLevel * 100).toFixed(0)}%
+              </span>
+              <span style={{ fontSize: '0.65rem', color: incubator.nutrientLevel > 0.85 ? 'var(--accent-green)' : 'var(--accent-amber)', fontWeight: 600, textTransform: 'uppercase' }}>
+                {incubator.nutrientLevel > 0.85 ? 'HIGH PERFUSION' : 'LOW PERFUSION'}
+              </span>
+            </div>
+          </div>
         </div>
       </div>
 
