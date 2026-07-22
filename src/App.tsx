@@ -22,6 +22,7 @@ export const App: React.FC = () => {
     electrodes, logs, burstMetrics, ethicsMetrics, rasterEvents,
     glutamateMatrix, gabaMatrix, meaViewMode, setMeaViewMode,
     modelType, setModelType,
+    cellPopulation, apoptosisCount, mitosisCount, averageNetworkHealth, lifecycleLogs,
     adjustIncubator, administerDopamine, administerGABA,
     triggerElectrodeStimulation, seedStemCells,
     setActiveTask, setLogicGate, addLog,
@@ -258,7 +259,7 @@ export const App: React.FC = () => {
         {/* Tab views */}
         <div style={{ flex: 1 }}>
           {activeTab === 'grow' && (
-            <GrowRoom vitals={vitals} seedStemCells={seedStemCells} addLog={addLog} />
+            <GrowRoom vitals={vitals} seedStemCells={seedStemCells} addLog={addLog} cellPopulation={cellPopulation} apoptosisCount={apoptosisCount} mitosisCount={mitosisCount} averageNetworkHealth={averageNetworkHealth} lifecycleLogs={lifecycleLogs} />
           )}
           {activeTab === 'mea' && (
             <ElectrophysiologyGrid
@@ -285,7 +286,7 @@ export const App: React.FC = () => {
             />
           )}
           {activeTab === 'incubator' && (
-            <IncubatorControls incubator={incubator} vitals={vitals} adjustIncubator={adjustIncubator} logs={logs} />
+            <IncubatorControls incubator={incubator} vitals={vitals} adjustIncubator={adjustIncubator} cellPopulation={cellPopulation} apoptosisCount={apoptosisCount} mitosisCount={mitosisCount} averageNetworkHealth={averageNetworkHealth} lifecycleLogs={lifecycleLogs} />
           )}
           {activeTab === 'benchmarks' && <Benchmarks />}
           {activeTab === 'about'      && <About />}
