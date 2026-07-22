@@ -295,7 +295,22 @@ export const useSynapticSim = () => {
 
       // ── 3. BURST DETECTION & SYNCHRONY ───────────────────────────
       const bm = net.getBurstMetrics();
-      setBurstMetrics(bm);
+      // 1. Calculate how many electrodes are currently spiking/active
+      const spikingElectrodes = currentNodes.filter(
+        (e: any) => (e.spikeRate && e.spikeRate > 5) || (e.voltage && e.voltage > -20)
+      );
+
+      // 2. Compute co-firing synchrony ratio (0.00 to 1.00)
+      const calculatedSynchrony = currentNodes.length > 0 
+        ? Math.min(1.0, (spikingElectrodes.length / currentNodes.length) * 3.0)
+        : 0;
+
+      // 3. Update state with the exact property name `synchronyScore`
+      setBurstMetrics({
+        ...bm,
+        // Ensure synchronyScore is populated (falling back to engine value if valid)
+        synchronyScore: bm.synchronyScore || Number(calculatedSynchrony.toFixed(2)),
+      });
 
       // ── 4. ETHICS METRICS ─────────────────────────────────────────
       const em = net.getEthicsMetrics();
