@@ -16,7 +16,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "vitest run"
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com/"
