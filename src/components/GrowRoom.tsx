@@ -6,6 +6,11 @@ interface GrowRoomProps {
   vitals: SimulationVitals;
   seedStemCells: () => void;
   addLog: (msg: string) => void;
+  cellPopulation: number;
+  apoptosisCount: number;
+  mitosisCount: number;
+  averageNetworkHealth: number;
+  lifecycleLogs: string[];
 }
 
 interface GrowthPath {
@@ -19,7 +24,12 @@ interface GrowthPath {
 export const GrowRoom: React.FC<GrowRoomProps> = ({
   vitals,
   seedStemCells,
-  addLog
+  addLog,
+  cellPopulation,
+  apoptosisCount,
+  mitosisCount,
+  averageNetworkHealth,
+  lifecycleLogs,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const spheroidCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -419,39 +429,47 @@ export const GrowRoom: React.FC<GrowRoomProps> = ({
         </div>
       </div>
 
-      {/* Grid of growth stats */}
+      {/* Cell Population Dynamics */}
+      <div>
+        <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: 'rgba(0,220,255,0.7)', fontWeight: 700, letterSpacing: '0.08em', marginBottom: '8px' }}>Cell Population Dynamics</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' }}>
         <div className="glass-panel" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)', fontWeight: 600 }}>Total Cell Count</span>
+          <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)', fontWeight: 600 }}>Live Cell Count</span>
           <span className="font-telemetry glow-text-green" style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--accent-green)' }}>
-            {vitals.cellCount.toLocaleString()} <span style={{ fontSize: '0.875rem', fontWeight: 400 }}>cells</span>
+            {cellPopulation.toLocaleString()} <span style={{ fontSize: '0.875rem', fontWeight: 400 }}>cells</span>
           </span>
-          <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)' }}>Average survival index: {vitals.viability}%</span>
+          <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)' }}>Active network electrodes</span>
         </div>
 
         <div className="glass-panel animate-panel" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)', fontWeight: 600 }}>Synaptic Density</span>
+          <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)', fontWeight: 600 }}>Apoptosis Rate</span>
           <span className="font-telemetry glow-text-cyan" style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--accent-cyan)' }}>
-            {vitals.synapticDensity} <span style={{ fontSize: '0.875rem', fontWeight: 400 }}>syn/cell</span>
+            {apoptosisCount} <span style={{ fontSize: '0.875rem', fontWeight: 400 }}>events</span>
           </span>
-          <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)' }}>Total connected junctions active</span>
+          <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)' }}>Cumulative cell loss this run</span>
         </div>
 
         <div className="glass-panel" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)', fontWeight: 600 }}>Axonal Net Length</span>
+          <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)', fontWeight: 600 }}>Mitosis Rate</span>
           <span className="font-telemetry" style={{ fontSize: '1.75rem', fontWeight: 700, color: '#a855f7' }}>
-            {(vitals.synapticDensity * 0.18 + growthPaths.length * 1.5).toFixed(1)} <span style={{ fontSize: '0.875rem', fontWeight: 400 }}>meters</span>
+            {mitosisCount} <span style={{ fontSize: '0.875rem', fontWeight: 400 }}>events</span>
           </span>
-          <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)' }}>Integrated paths inside agar hydrogel</span>
+          <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)' }}>Cumulative successful divisions</span>
         </div>
 
         <div className="glass-panel" style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)', fontWeight: 600 }}>Myelination Index</span>
+          <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)', fontWeight: 600 }}>Average Health Index</span>
           <span className="font-telemetry glow-text-amber" style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--accent-amber)' }}>
-            {vitals.myelination}%
+            {(averageNetworkHealth * 100).toFixed(1)}%
           </span>
-          <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)' }}>Insulated signal speed optimization</span>
+          <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)' }}>Mean health across live cells</span>
         </div>
+      </div>
+      </div>
+
+      <div className="glass-panel" style={{ padding: '14px 18px', maxHeight: '145px', overflowY: 'auto' }}>
+        <div style={{ fontSize: '0.7rem', textTransform: 'uppercase', color: 'rgba(0,220,255,0.7)', fontWeight: 700, letterSpacing: '0.08em', marginBottom: '8px' }}>Lifecycle &amp; Health Log</div>
+        {lifecycleLogs.length ? lifecycleLogs.map((log) => <div key={log} style={{ fontFamily: 'var(--font-mono)', fontSize: '0.72rem', padding: '4px 0', borderBottom: '1px solid rgba(255,255,255,0.04)', color: log.includes('APOPTOSIS') ? 'var(--accent-red)' : 'var(--accent-green)' }}>{log}</div>) : <div style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.4)' }}>No lifecycle changes detected. Population is stable.</div>}
       </div>
 
       {/* Growth Render viewport */}
