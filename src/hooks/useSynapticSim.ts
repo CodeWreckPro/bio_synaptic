@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { SynapticNetwork, Electrode as EngineElectrode } from '@ppradyoth/bio-synaptic-engine';
+import { SynapticNetwork } from '@ppradyoth/bio-synaptic-engine';
+import type { Electrode as EngineElectrode } from '@ppradyoth/bio-synaptic-engine';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -77,7 +78,8 @@ export interface LifecycleEvent {
 
 export const useSynapticSim = () => {
   // Instance of core simulation engine
-  const networkRef = useRef<SynapticNetwork>(new SynapticNetwork());
+  const [network] = useState(() => new SynapticNetwork());
+  const networkRef = useRef<SynapticNetwork>(network);
 
   // Neuron model selection
   const [modelType, setModelType] = useState<NeuronModel>('izhikevich');
@@ -94,13 +96,13 @@ export const useSynapticSim = () => {
   });
 
   // Electrodes & Chemistry
-  const [electrodes, setElectrodes] = useState<Electrode[]>(networkRef.current.electrodes);
-  const [glutamateMatrix, setGlutamateMatrix] = useState<ChemicalMatrix>(networkRef.current.glutamateMatrix);
-  const [gabaMatrix, setGabaMatrix] = useState<ChemicalMatrix>(networkRef.current.gabaMatrix);
+  const [electrodes, setElectrodes] = useState<Electrode[]>(() => network.electrodes);
+  const [glutamateMatrix, setGlutamateMatrix] = useState<ChemicalMatrix>(() => network.glutamateMatrix);
+  const [gabaMatrix, setGabaMatrix] = useState<ChemicalMatrix>(() => network.gabaMatrix);
   const [meaViewMode, setMeaViewMode] = useState<MEAViewMode>('voltage');
 
   // Phase 2 Telemetry State
-  const [cellPopulation, setCellPopulation] = useState<number>(networkRef.current.electrodes.length);
+  const [cellPopulation, setCellPopulation] = useState<number>(() => network.electrodes.length);
   const [apoptosisCount, setApoptosisCount] = useState<number>(0);
   const [mitosisCount, setMitosisCount] = useState<number>(0);
   const [averageNetworkHealth, setAverageNetworkHealth] = useState<number>(1.0);
@@ -405,4 +407,3 @@ export const useSynapticSim = () => {
     addLog,
   };
 };
-
